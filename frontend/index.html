@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interview Assist — Live Transcription</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand__mark"></span>
+        <div>
+          <h1>Interview Assist</h1>
+          <p>Live call transcription · Deepgram nova-3</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav__tab is-active" id="navLive" data-view="live">● Live</button>
+        <button class="nav__tab" id="navLibrary" data-view="library">▤ Library</button>
+      </nav>
+      <div class="statuses">
+        <div class="status">
+          <span class="dot" id="micStatus" data-state="off"></span>
+          <span id="micLabel">Interviewer (mic)</span>
+        </div>
+        <div class="status" id="candidateStatus">
+          <span class="dot" id="callStatus" data-state="off"></span>
+          <span>Candidate (call audio)</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="banner" id="banner" data-kind="info" style="display:none"></div>
+
+    <main class="workspace">
+      <!-- Left: live transcript -->
+      <section class="board">
+        <div class="controls">
+          <button id="startBtn" class="btn btn--primary">▶ Start listening</button>
+          <button id="stopBtn" class="btn" disabled>■ Stop</button>
+          <div class="modeToggle" role="radiogroup" aria-label="Call type" title="VC: share a Teams/Zoom/Meet tab. Phone: candidate on speakerphone, captured via your mic.">
+            <label><input type="radio" name="callMode" value="vc" checked /> VC tab</label>
+            <label><input type="radio" name="callMode" value="phone" /> Phone</label>
+          </div>
+          <div class="spacer"></div>
+          <button id="copyBtn" class="btn btn--ghost">Copy</button>
+          <button id="clearBtn" class="btn btn--ghost">Clear</button>
+        </div>
+
+        <div class="transcript" id="transcript">
+          <div class="empty" id="emptyState">
+            <h2>Ready when you are</h2>
+            <ol>
+              <li>Click <b>Start listening</b> and allow your <b>microphone</b> (that's you, the Interviewer).
+                <span class="hint">On macOS you may first need to enable the mic for Chrome in
+                System Settings → Privacy &amp; Security → Microphone.</span></li>
+              <li>When the share dialog opens, pick the <b>Teams / Zoom / Meet / FreJun tab</b> and tick
+                <b>“Share tab audio”</b> (or “Share system audio”). That side is the <b>Candidate</b>.</li>
+              <li>Talk — transcripts appear live, labelled per speaker.</li>
+            </ol>
+            <p class="hint">Tip: for the desktop Teams/Zoom apps (not in-browser), share your whole screen
+              and enable system audio, or run the call in a browser tab for the cleanest capture.</p>
+            <p class="hint"><b>Phone call?</b> Switch the toggle to <b>Phone</b> when the candidate is on a
+              regular phone call on <b>speakerphone</b>. We capture only your laptop mic (no tab share) and
+              separate the two voices automatically into <b>Speaker 1 / Speaker 2</b> — labels are
+              best-effort, not guaranteed recruiter-vs-candidate.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: GPT-4o-mini co-pilot -->
+      <aside class="assist" id="assist">
+        <div class="assist__head">
+          <h2>Interview Assist</h2>
+          <button id="assistRefresh" class="btn btn--ghost btn--sm" disabled>↻ Refresh</button>
+        </div>
+
+        <!-- Setup: Client / JD group + candidate + optional resume -->
+        <section class="card" id="assistSetup">
+          <div class="card__title">Set up the call</div>
+
+          <div class="field">
+            <span>Client</span>
+            <div class="selectRow">
+              <select id="clientSelect"></select>
+              <button type="button" class="btn btn--ghost btn--sm" id="newClientBtn">＋ New</button>
+            </div>
+          </div>
+          <div class="inlineNew hidden" id="newClientRow">
+            <input type="text" id="newClientName" placeholder="Client name" />
+            <button type="button" class="btn btn--sm" id="saveClientBtn">Save client</button>
+          </div>
+
+          <div class="field">
+            <span>Job description (JD) <small>— reused across candidates</small></span>
+            <div class="selectRow">
+              <select id="jdSelect"></select>
+              <button type="button" class="btn btn--ghost btn--sm" id="newJdBtn">＋ New</button>
+            </div>
+          </div>
+          <div class="inlineNew hidden" id="newJdRow">
+            <input type="text" id="newJdTitle" placeholder="Role title (e.g. Senior Backend Engineer)" />
+            <textarea id="newJdText" rows="3" placeholder="Paste the JD text — or upload a PDF/Word file below. Stored once, reused for every candidate…"></textarea>
+            <input type="file" id="newJdFile" accept=".pdf,.docx,.txt" />
+            <button type="button" class="btn btn--sm" id="saveJdBtn">Save JD</button>
+          </div>
+
+          <label class="field">
+            <span>Candidate name <small>(optional)</small></span>
+            <input type="text" id="candidateName" placeholder="e.g. Priya Sharma" />
+          </label>
+
+          <label class="field">
+            <span>Candidate resume <small>(optional)</small></span>
+            <textarea id="resumeText" rows="3" placeholder="Paste the resume…"></textarea>
+            <input type="file" id="resumeFile" accept=".pdf,.docx,.txt" />
+          </label>
+
+          <details class="field jdOverride">
+            <summary>Override / ad-hoc JD text</summary>
+            <textarea id="jdText" rows="3" placeholder="Optional — used when no saved JD is selected."></textarea>
+            <input type="file" id="jdFile" accept=".pdf,.docx,.txt" />
+          </details>
+
+          <button id="assistStart" class="btn btn--primary btn--block">Start assist</button>
+          <div class="assist__status" id="assistStatus"></div>
+        </section>
+
+        <!-- Candidate snapshot (pre-call read of JD vs resume) -->
+        <section class="card hidden" id="assistSnapshotCard">
+          <div class="card__title">Candidate snapshot <span class="verdictBadge" id="assistFitVerdict" hidden></span></div>
+          <p class="snapshot" id="assistSnapshot"></p>
+          <div class="evidence">
+            <ul class="evidence__list evidence__list--good" id="assistStrengths"></ul>
+            <ul class="evidence__list evidence__list--bad" id="assistGaps"></ul>
+          </div>
+        </section>
+
+        <!-- Opening questions -->
+        <section class="card hidden" id="assistOpeningCard">
+          <div class="card__title">Opening questions</div>
+          <div class="chips" id="assistOpening"></div>
+        </section>
+
+        <!-- Recommendation — the quick good/bad signal -->
+        <section class="card card--rec hidden" id="assistRecCard">
+          <div class="card__title">Recommendation</div>
+          <div class="rec">
+            <span class="verdictBadge verdictBadge--lg" id="assistRecVerdict">—</span>
+            <p class="rec__rationale" id="assistRecRationale"></p>
+          </div>
+        </section>
+
+        <!-- Watch-outs / red flags -->
+        <section class="card hidden" id="assistFlagsCard">
+          <div class="card__title">⚠ Watch-outs</div>
+          <ul class="flags" id="assistFlags"></ul>
+        </section>
+
+        <!-- Live score -->
+        <section class="card hidden" id="assistScoreCard">
+          <div class="card__title">How it's going</div>
+          <div class="score">
+            <div class="score__ring" id="scoreRing"><span id="scoreOverall">–</span></div>
+            <div class="score__bars">
+              <div class="bar"><label>Communication</label><div class="bar__track"><i id="barComm"></i></div></div>
+              <div class="bar"><label>Relevance</label><div class="bar__track"><i id="barRel"></i></div></div>
+              <div class="bar"><label>Depth</label><div class="bar__track"><i id="barDepth"></i></div></div>
+            </div>
+          </div>
+          <p class="feedback" id="assistFeedback"></p>
+        </section>
+
+        <!-- Suggested next questions -->
+        <section class="card hidden" id="assistNextCard">
+          <div class="card__title">Suggested next questions</div>
+          <div class="chips" id="assistNext"></div>
+        </section>
+
+        <!-- Extracted fields -->
+        <section class="card hidden" id="assistFieldsCard">
+          <div class="card__title">Candidate details</div>
+          <table class="fields" id="assistFields">
+            <tr data-k="current_position"><th>Current Position</th><td>—</td></tr>
+            <tr data-k="current_company"><th>Current Company</th><td>—</td></tr>
+            <tr data-k="current_location"><th>Current Location</th><td>—</td></tr>
+            <tr data-k="current_salary"><th>Current Salary</th><td>—</td></tr>
+            <tr data-k="expected_salary"><th>Expected Salary</th><td>—</td></tr>
+          </table>
+        </section>
+      </aside>
+    </main>
+
+    <!-- Library: browse saved interviews grouped by Client → JD -->
+    <main class="library hidden" id="libraryView">
+      <aside class="library__list" id="libraryList">
+        <div class="library__listHead">
+          <span>Saved interviews</span>
+          <button class="btn btn--ghost btn--sm" id="libraryRefresh">↻</button>
+        </div>
+        <div id="libraryGroups"></div>
+      </aside>
+      <section class="library__detail" id="libraryDetail">
+        <div class="empty">
+          <h2>Select an interview</h2>
+          <p class="hint">Pick a saved interview on the left to see its transcript and the
+            co-pilot's analysis.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="ui.js"></script>
+  <script src="app.js"></script>
+  <script src="assist.js"></script>
+  <script src="library.js"></script>
+</body>
+</html>

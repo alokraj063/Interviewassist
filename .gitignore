@@ -1,0 +1,22 @@
+# env / secrets
+.env
+**/.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+backend/.venv/
+uv.lock
+
+# saved transcripts
+transcripts/
+
+# local SQLite database (clients / JDs / interviews)
+backend/data.db
+backend/data.db-*
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/

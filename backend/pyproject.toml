@@ -1,0 +1,18 @@
+[project]
+name = "interview-assist-backend"
+version = "1.0.0"
+description = "WebSocket proxy that streams browser audio to Deepgram nova-3 and a GPT-4o-mini interview co-pilot."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13,<15",
+    "python-dotenv>=1.0",
+    "openai>=1.40",
+    "pypdf>=4",
+    "python-docx>=1.1",
+    "python-multipart>=0.0.9",
+]
+
+[tool.uv]
+package = false
