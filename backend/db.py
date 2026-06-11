@@ -31,13 +31,21 @@ def _now() -> str:
 
 
 def _new_id() -> str:
-    return uuid.uuid4().hex[:12]
+    # Full uuid4: 32 hex chars, 122 bits of entropy — collisions are negligible even
+    # under heavy concurrent insert load from many recruiters at once.
+    return uuid.uuid4().hex
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    # WAL: concurrent readers don't block the single writer (or each other), which is
+    # what we want for multi-recruiter usage. NORMAL sync is durable enough for the
+    # post-call save pattern and keeps writes snappy.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 

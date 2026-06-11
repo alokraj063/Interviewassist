@@ -26,14 +26,30 @@ The Deepgram API key lives **only** on the backend — the browser never sees it
 ## Project layout
 
 ```
-backend/      FastAPI WebSocket proxy + static host  (Python)
-  server.py
+backend/                  FastAPI WebSocket proxy + REST API (Python)
+  server.py               /api/*, /assist/*, /transcript, /stream
+  db.py                   SQLite-backed clients / JDs / interviews
   pyproject.toml
-frontend/     Static UI (no build step)
-  index.html
-  styles.css
-  app.js
-  pcm-worklet.js   AudioWorklet: resample to 16 kHz linear16
+frontend/                 React + Vite UI (built to frontend/dist)
+  package.json
+  vite.config.js          Dev proxy: /api, /assist, /stream → backend :3001
+  index.html              Vite entry
+  public/
+    pcm-worklet.js        AudioWorklet: resample to 16 kHz linear16
+  src/
+    main.jsx              React entry
+    App.jsx               Top-level layout (Live | Library)
+    styles/index.css      All styles
+    lib/
+      api.js              fetch wrappers for the backend
+      audio.js            WebSocket Source + media-capture helpers
+    hooks/
+      useAudioCapture.js  Mic + display media + transcript log
+      useInterviewFlow.js Setup → /assist/start → next-question loop → final score
+    components/           Topbar, Transcript, AssistPanel, SetupCard,
+                          AskNextCard, LastAnswerCard, HistoryCard,
+                          SnapshotCard, FinalScoreCard, Library
+frontend.legacy/          The original vanilla-JS UI (kept for reference)
 ```
 
 ---
@@ -59,7 +75,7 @@ OPENAI_MODEL=gpt-4o-mini        # co-pilot model
 Get a Deepgram key at <https://console.deepgram.com/> and an OpenAI key at
 <https://platform.openai.com/api-keys>. Both keys stay on the backend — never sent to the browser.
 
-### 2. Install & run (uses [uv](https://docs.astral.sh/uv/))
+### 2. Install & run the backend (uses [uv](https://docs.astral.sh/uv/))
 
 ```bash
 cd backend
@@ -68,17 +84,30 @@ uv run server.py
 
 `uv` creates the virtualenv and installs dependencies automatically on first run.
 
-> Plain pip alternative:
-> ```bash
-> cd backend && python3 -m venv .venv && source .venv/bin/activate
-> pip install -e . && python server.py
-> ```
+### 3. Install & run the frontend
 
-### 3. Open the app
+#### Development (hot reload, recommended while iterating)
 
-<http://localhost:3001>
+```bash
+cd frontend
+npm install
+npm run dev          # Vite at http://localhost:5173
+```
 
-The backend serves the frontend, so everything is one origin (no CORS/WS issues).
+The Vite dev server proxies `/api`, `/assist`, `/transcript`, and the `/stream`
+WebSocket to the backend at `:3001`, so everything is one origin from the browser's
+perspective — no CORS or WS issues. Open <http://localhost:5173>.
+
+#### Production (single-origin build)
+
+```bash
+cd frontend
+npm install
+npm run build        # emits frontend/dist/
+```
+
+Then start the backend; FastAPI automatically mounts `frontend/dist` at `/` and
+serves the React build at <http://localhost:3001>.
 
 > **Use `localhost` specifically.** Mic and screen capture only work in a secure context.
 > Opening the app on `http://0.0.0.0:3001`, a LAN IP (`http://192.168.x.x:3001`), or a

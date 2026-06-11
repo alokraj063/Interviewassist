@@ -41,8 +41,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-TRANSCRIPT_DIR = Path(__file__).resolve().parent.parent / "transcripts"
+# In production: serve the Vite build at frontend/dist.
+# In dev: developers run Vite on :5173 (it proxies /api, /assist, /stream to here).
+_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = _ROOT / "frontend" / "dist"
+FRONTEND_DIR = FRONTEND_DIST if FRONTEND_DIST.exists() else None
+TRANSCRIPT_DIR = _ROOT / "transcripts"
 TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Interview Assist")
@@ -185,6 +189,8 @@ async def api_create_interview(req: Request):
 @app.post("/api/interviews/{interview_id}/end")
 async def api_end_interview(interview_id: str):
     await asyncio.to_thread(db.end_interview, interview_id)
+    # Free the per-interview in-memory state so long-running servers don't leak.
+    _drop_session(interview_id)
     return {"ok": True}
 
 
@@ -207,7 +213,31 @@ FIELD_KEYS = [
     "current_position", "current_company", "current_location",
     "current_salary", "expected_salary",
 ]
-ASSIST_SESSIONS: dict[str, dict] = {}  # ephemeral, in-memory per running session
+
+# ---- Multi-user safety ----------------------------------------------------
+# ASSIST_SESSIONS is in-memory, keyed by the interview id. Each running interview
+# (one recruiter, one candidate) has its own entry, so concurrent interviews never
+# touch each other's keys. To make read-modify-write blocks (extending fields,
+# merging start+plan into the same session) safe against bursts of requests from
+# the SAME interview, we serialise per-session with an asyncio.Lock.
+ASSIST_SESSIONS: dict[str, dict] = {}
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _session_lock(session_id: str) -> asyncio.Lock:
+    lock = _SESSION_LOCKS.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SESSION_LOCKS[session_id] = lock
+    return lock
+
+
+def _drop_session(session_id: str) -> None:
+    """Free in-memory state for a finished interview so the dicts can't grow forever."""
+    if not session_id:
+        return
+    ASSIST_SESSIONS.pop(session_id, None)
+    _SESSION_LOCKS.pop(session_id, None)
 
 
 def _blank_fields() -> dict:
@@ -386,12 +416,15 @@ async def assist_plan(
     categories = result.get("categories") or []
 
     # Stash on the assist session so subsequent verify / analyze calls see the resume.
+    # Per-session lock keeps concurrent plan / start / analyze calls for the SAME
+    # interview from racing on the read-modify-write below.
     session_id = interview_id or uuid.uuid4().hex
-    session = ASSIST_SESSIONS.get(session_id) or {"fields": _blank_fields()}
-    session["jd"] = jd or session.get("jd", "")
-    session["resume"] = resume or session.get("resume", "")
-    session.setdefault("fields", _blank_fields())
-    ASSIST_SESSIONS[session_id] = session
+    async with _session_lock(session_id):
+        session = ASSIST_SESSIONS.get(session_id) or {"fields": _blank_fields()}
+        session["jd"] = jd or session.get("jd", "")
+        session["resume"] = resume or session.get("resume", "")
+        session.setdefault("fields", _blank_fields())
+        ASSIST_SESSIONS[session_id] = session
 
     return {
         "ok": True,
@@ -620,8 +653,17 @@ async def assist_start(
 
     # Key the in-memory session by the interview id so the transcript, analyze loop,
     # and the saved row all share one id. Fall back to a fresh id if none was passed.
+    # The per-session lock makes concurrent /assist/start + /assist/plan + /assist/next
+    # calls for the SAME interview safe — different interviews are different keys and
+    # never contend.
     session_id = interview_id or uuid.uuid4().hex
-    ASSIST_SESSIONS[session_id] = {"jd": jd, "resume": resume, "fields": _blank_fields()}
+    async with _session_lock(session_id):
+        existing = ASSIST_SESSIONS.get(session_id) or {}
+        ASSIST_SESSIONS[session_id] = {
+            "jd": jd or existing.get("jd", ""),
+            "resume": resume or existing.get("resume", ""),
+            "fields": existing.get("fields") or _blank_fields(),
+        }
     if interview_id:
         await asyncio.to_thread(
             db.attach_assist, interview_id, jd, resume, summary, opening, fit_verdict, strengths, gaps
@@ -661,11 +703,15 @@ async def assist_analyze(req: Request):
     result = await _gpt_json(ANALYZE_SYSTEM, user)
 
     # Merge fields: a newly stated (non-blank) value wins; otherwise keep what we had.
+    # Serialise the read-modify-write so two concurrent /assist/analyze ticks for the
+    # SAME interview can't clobber each other's merge.
+    session_id_for_lock = data.get("sessionId", "")
     new_fields = result.get("fields") or {}
-    for k in FIELD_KEYS:
-        val = str(new_fields.get(k, "") or "").strip()
-        if val:
-            session["fields"][k] = val
+    async with _session_lock(session_id_for_lock):
+        for k in FIELD_KEYS:
+            val = str(new_fields.get(k, "") or "").strip()
+            if val:
+                session["fields"][k] = val
 
     score = result.get("score", {})
     feedback = result.get("feedback", "")
@@ -860,8 +906,20 @@ async def stream(client: WebSocket):
 
 
 # Mount the static frontend last so it doesn't shadow /health or /stream.
-if FRONTEND_DIR.exists():
+if FRONTEND_DIR is not None:
+    # Production: serve the built React app (Vite emits to frontend/dist).
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+else:
+    @app.get("/")
+    async def _missing_build():
+        return {
+            "ok": False,
+            "message": (
+                "Frontend build not found at frontend/dist. "
+                "Run `cd frontend && npm install && npm run build` for production, "
+                "or `npm run dev` to use the Vite dev server on http://localhost:5173."
+            ),
+        }
 
 
 if __name__ == "__main__":
