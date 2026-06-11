@@ -39,12 +39,7 @@
       <!-- Left: live transcript -->
       <section class="board">
         <div class="controls">
-          <button id="startBtn" class="btn btn--primary">▶ Start listening</button>
-          <button id="stopBtn" class="btn" disabled>■ Stop</button>
-          <div class="modeToggle" role="radiogroup" aria-label="Call type" title="VC: share a Teams/Zoom/Meet tab. Phone: candidate on speakerphone, captured via your mic.">
-            <label><input type="radio" name="callMode" value="vc" checked /> VC tab</label>
-            <label><input type="radio" name="callMode" value="phone" /> Phone</label>
-          </div>
+          <button id="stopBtn" class="btn" disabled>■ Stop interview</button>
           <div class="spacer"></div>
           <button id="copyBtn" class="btn btn--ghost">Copy</button>
           <button id="clearBtn" class="btn btn--ghost">Clear</button>
@@ -59,7 +54,8 @@
                 System Settings → Privacy &amp; Security → Microphone.</span></li>
               <li>When the share dialog opens, pick the <b>Teams / Zoom / Meet / FreJun tab</b> and tick
                 <b>“Share tab audio”</b> (or “Share system audio”). That side is the <b>Candidate</b>.</li>
-              <li>Talk — transcripts appear live, labelled per speaker.</li>
+              <li>Talk — transcripts appear live, labelled per speaker. The right panel will tell you
+                what to ask next, and whether each answer was on the mark.</li>
             </ol>
             <p class="hint">Tip: for the desktop Teams/Zoom apps (not in-browser), share your whole screen
               and enable system audio, or run the call in a browser tab for the cleanest capture.</p>
@@ -71,14 +67,14 @@
         </div>
       </section>
 
-      <!-- Right: GPT-4o-mini co-pilot -->
+      <!-- Right: intelligent live-flow co-pilot -->
       <aside class="assist" id="assist">
         <div class="assist__head">
           <h2>Interview Assist</h2>
-          <button id="assistRefresh" class="btn btn--ghost btn--sm" disabled>↻ Refresh</button>
+          <button id="assistRefresh" class="btn btn--ghost btn--sm" disabled>↻ Check now</button>
         </div>
 
-        <!-- Setup: Client / JD group + candidate + optional resume -->
+        <!-- Setup: just Client + JD + Resume -->
         <section class="card" id="assistSetup">
           <div class="card__title">Set up the call</div>
 
@@ -109,24 +105,74 @@
           </div>
 
           <label class="field">
-            <span>Candidate name <small>(optional)</small></span>
-            <input type="text" id="candidateName" placeholder="e.g. Priya Sharma" />
-          </label>
-
-          <label class="field">
-            <span>Candidate resume <small>(optional)</small></span>
-            <textarea id="resumeText" rows="3" placeholder="Paste the resume…"></textarea>
+            <span>Candidate resume <small>— PDF, DOCX, or TXT</small></span>
             <input type="file" id="resumeFile" accept=".pdf,.docx,.txt" />
           </label>
 
-          <details class="field jdOverride">
-            <summary>Override / ad-hoc JD text</summary>
-            <textarea id="jdText" rows="3" placeholder="Optional — used when no saved JD is selected."></textarea>
-            <input type="file" id="jdFile" accept=".pdf,.docx,.txt" />
-          </details>
+          <div class="field">
+            <span>Call type</span>
+            <div class="modeToggle" role="radiogroup" aria-label="Call type" title="VC: share a Teams/Zoom/Meet tab. Phone: candidate on speakerphone, captured via your mic.">
+              <label><input type="radio" name="callMode" value="vc" checked /> VC tab</label>
+              <label><input type="radio" name="callMode" value="phone" /> Phone</label>
+            </div>
+          </div>
 
-          <button id="assistStart" class="btn btn--primary btn--block">Start assist</button>
+          <button id="assistStart" class="btn btn--primary btn--block">▶ Start interview</button>
           <div class="assist__status" id="assistStatus"></div>
+        </section>
+
+        <!-- Ask next — the one-question-at-a-time signal -->
+        <section class="card askNext hidden" id="askNextCard">
+          <div class="askNext__head">
+            <span class="askNext__cat" id="askNextCat">Skills</span>
+            <span class="askNext__prog" id="askNextProgress">— of —</span>
+          </div>
+          <p class="askNext__q" id="askNextQuestion">—</p>
+          <p class="askNext__copyHint">Tap the question to copy. Auto-advances when the candidate answers it.</p>
+          <div class="askNext__actions">
+            <button id="askNextSkip" class="btn btn--ghost btn--sm">Skip</button>
+            <button id="askNextDone" class="btn btn--sm">✓ Mark answered</button>
+            <button id="askNextFinish" class="btn btn--sm">⏹ End & score</button>
+          </div>
+        </section>
+
+        <!-- Final candidate score (rendered when the interview wraps) -->
+        <section class="card finalCard hidden" id="finalCard">
+          <div class="finalCard__head">
+            <div class="card__title">Final evaluation</div>
+            <span class="verdictBadge verdictBadge--lg" id="finalVerdict">—</span>
+          </div>
+          <div class="finalScore">
+            <div class="score__ring finalScore__ring" id="finalRing"><span id="finalOverall">–</span></div>
+            <div class="score__bars">
+              <div class="bar"><label>Skills match</label><div class="bar__track"><i id="finalBarSkills"></i></div></div>
+              <div class="bar"><label>Relevance</label><div class="bar__track"><i id="finalBarRel"></i></div></div>
+              <div class="bar"><label>Depth</label><div class="bar__track"><i id="finalBarDepth"></i></div></div>
+              <div class="bar"><label>Communication</label><div class="bar__track"><i id="finalBarComm"></i></div></div>
+            </div>
+          </div>
+          <p class="finalSummary" id="finalSummary"></p>
+          <div class="evidence">
+            <ul class="evidence__list evidence__list--good" id="finalStrengths"></ul>
+            <ul class="evidence__list evidence__list--bad" id="finalConcerns"></ul>
+          </div>
+        </section>
+
+        <!-- Latest answer — correct or wrong + feedback -->
+        <section class="card hidden" id="lastAnswerCard">
+          <div class="card__title">Latest answer</div>
+          <div class="lastAns">
+            <span class="lastAns__verdict" id="lastAnsVerdict" data-kind="wait">Waiting…</span>
+            <p class="lastAns__fb" id="lastAnsFeedback">Talking to the candidate? I'll evaluate every answer as it comes through.</p>
+          </div>
+          <div class="lastAns__quote hidden" id="lastAnsQuote"></div>
+          <div class="lastAns__followup hidden" id="lastAnsFollowup"></div>
+        </section>
+
+        <!-- Past questions in this interview: full Q + answer + feedback per item -->
+        <section class="card hidden" id="planQueueCard">
+          <div class="card__title">Asked so far</div>
+          <div class="history" id="planQueue"></div>
         </section>
 
         <!-- Candidate snapshot (pre-call read of JD vs resume) -->
@@ -139,57 +185,13 @@
           </div>
         </section>
 
-        <!-- Opening questions -->
-        <section class="card hidden" id="assistOpeningCard">
-          <div class="card__title">Opening questions</div>
-          <div class="chips" id="assistOpening"></div>
-        </section>
-
-        <!-- Recommendation — the quick good/bad signal -->
+        <!-- Recommendation — overall good/bad signal -->
         <section class="card card--rec hidden" id="assistRecCard">
           <div class="card__title">Recommendation</div>
           <div class="rec">
             <span class="verdictBadge verdictBadge--lg" id="assistRecVerdict">—</span>
             <p class="rec__rationale" id="assistRecRationale"></p>
           </div>
-        </section>
-
-        <!-- Watch-outs / red flags -->
-        <section class="card hidden" id="assistFlagsCard">
-          <div class="card__title">⚠ Watch-outs</div>
-          <ul class="flags" id="assistFlags"></ul>
-        </section>
-
-        <!-- Live score -->
-        <section class="card hidden" id="assistScoreCard">
-          <div class="card__title">How it's going</div>
-          <div class="score">
-            <div class="score__ring" id="scoreRing"><span id="scoreOverall">–</span></div>
-            <div class="score__bars">
-              <div class="bar"><label>Communication</label><div class="bar__track"><i id="barComm"></i></div></div>
-              <div class="bar"><label>Relevance</label><div class="bar__track"><i id="barRel"></i></div></div>
-              <div class="bar"><label>Depth</label><div class="bar__track"><i id="barDepth"></i></div></div>
-            </div>
-          </div>
-          <p class="feedback" id="assistFeedback"></p>
-        </section>
-
-        <!-- Suggested next questions -->
-        <section class="card hidden" id="assistNextCard">
-          <div class="card__title">Suggested next questions</div>
-          <div class="chips" id="assistNext"></div>
-        </section>
-
-        <!-- Extracted fields -->
-        <section class="card hidden" id="assistFieldsCard">
-          <div class="card__title">Candidate details</div>
-          <table class="fields" id="assistFields">
-            <tr data-k="current_position"><th>Current Position</th><td>—</td></tr>
-            <tr data-k="current_company"><th>Current Company</th><td>—</td></tr>
-            <tr data-k="current_location"><th>Current Location</th><td>—</td></tr>
-            <tr data-k="current_salary"><th>Current Salary</th><td>—</td></tr>
-            <tr data-k="expected_salary"><th>Expected Salary</th><td>—</td></tr>
-          </table>
         </section>
       </aside>
     </main>

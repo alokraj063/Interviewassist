@@ -299,6 +299,285 @@ ANALYZE_SYSTEM = (
 )
 
 
+PLAN_SYSTEM = (
+    "You are an interview architect. Given a candidate's resume (and optional job description), "
+    "design a structured, personalized interview plan. Group questions into these categories in "
+    "this exact order: 'Skills' (verify the skills/tools the resume claims), "
+    "'Technical Deep-Dive' (probe core projects and technical reasoning), and "
+    "'Experience' (behavioral / project-impact questions).\n"
+    "Hard rules:\n"
+    "- Every question must reference SPECIFIC content from the resume — a named technology, a "
+    "project, a role, or a claim. No generic 'tell me about a time' questions.\n"
+    "- Order from broad to deep within each category — start with verification, then drill in.\n"
+    "- 2-3 questions per category, 6-9 total.\n"
+    "Respond ONLY as JSON with this exact shape:\n"
+    '{"categories": [{"name": str, "questions": [str, ...]}, ...]}.'
+)
+
+VERIFY_SYSTEM = (
+    "You are a PRACTICAL interview evaluator helping the recruiter judge each answer in real "
+    "time. Be FAIR — not harsh. Most real interview answers are imperfect but acceptable, and "
+    "the recruiter needs to keep the conversation moving, not interrogate the candidate.\n"
+    "Calibration (lean lenient, not strict):\n"
+    "  - 'Strong'    = clear, specific, technically sound; concrete example or detail.\n"
+    "  - 'Adequate'  = on-topic with at least some real content. THIS IS THE DEFAULT for any "
+    "answer that addresses the question and shows the candidate gets it — even briefly. "
+    "Mark satisfied=true.\n"
+    "  - 'Weak'      = on-topic but genuinely thin — generic, single-sentence, no specifics at "
+    "all and clearly hiding lack of knowledge. Only when the recruiter would actually want to "
+    "re-probe. Mark satisfied=false.\n"
+    "  - 'Vague'     = wandering buzzwords with zero substance. Rare; reserve for true empty "
+    "non-answers. satisfied=false.\n"
+    "  - 'Off-topic' = answered a different question or refused. satisfied=false.\n"
+    "Default to 'Adequate' when in doubt. A correct one-sentence answer is Adequate, not Weak. "
+    "Do NOT penalise brevity — penalise only true lack of substance.\n"
+    "FEEDBACK STYLE: one short, plain-English sentence a recruiter can scan in a second. Speak "
+    "ABOUT the candidate (\"They\" / \"The candidate\"), not to them. Don't echo the question. "
+    "Examples:\n"
+    "  - \"Specific and accurate — named the exact tools and explained the trade-off.\"\n"
+    "  - \"Clear and on-topic, though brief; no concrete example given.\"\n"
+    "  - \"Off-topic — talked about a different project than the one asked.\"\n"
+    "If verdict is Weak/Vague/Off-topic, suggest ONE probing follow-up specific to what they "
+    "actually said. Otherwise followUp is an empty string.\n"
+    "Respond ONLY as JSON with this exact shape:\n"
+    '{"satisfied": bool, "verdict": one of "Strong"|"Adequate"|"Weak"|"Off-topic"|"Vague", '
+    '"feedback": str, "followUp": str}.'
+)
+
+
+@app.post("/assist/plan")
+async def assist_plan(
+    candidate_name: str = Form(""),
+    resume_text: str = Form(""),
+    jd_text: str = Form(""),
+    interview_id: str = Form(""),
+    resume_file: UploadFile | None = File(None),
+    jd_file: UploadFile | None = File(None),
+):
+    """Generate a categorized question plan from the candidate's resume."""
+    if openai_client is None:
+        return {"ok": False, "error": "OPENAI_API_KEY not set on the server."}
+
+    resume = resume_text.strip()
+    jd = jd_text.strip()
+    if resume_file is not None:
+        resume = (extract_text(resume_file.filename, await resume_file.read()) + "\n" + resume).strip()
+    if jd_file is not None:
+        jd = (extract_text(jd_file.filename, await jd_file.read()) + "\n" + jd).strip()
+
+    # Reuse saved JD attached to the interview row, if any.
+    interview_id = (interview_id or "").strip()
+    if not jd and interview_id:
+        row = await asyncio.to_thread(db.get_interview, interview_id)
+        if row and row.get("jd_id"):
+            saved = await asyncio.to_thread(db.get_jd, row["jd_id"])
+            if saved:
+                jd = (saved.get("jd_text") or "").strip()
+
+    if not resume:
+        return {"ok": False, "error": "A candidate resume is required to generate questions."}
+
+    user = (
+        f"CANDIDATE NAME: {candidate_name or '(unknown)'}\n\n"
+        f"CANDIDATE RESUME:\n{resume}\n\n"
+        f"JOB DESCRIPTION:\n{jd or '(none provided)'}"
+    )
+    result = await _gpt_json(PLAN_SYSTEM, user)
+    categories = result.get("categories") or []
+
+    # Stash on the assist session so subsequent verify / analyze calls see the resume.
+    session_id = interview_id or uuid.uuid4().hex
+    session = ASSIST_SESSIONS.get(session_id) or {"fields": _blank_fields()}
+    session["jd"] = jd or session.get("jd", "")
+    session["resume"] = resume or session.get("resume", "")
+    session.setdefault("fields", _blank_fields())
+    ASSIST_SESSIONS[session_id] = session
+
+    return {
+        "ok": True,
+        "sessionId": session_id,
+        "candidateName": (candidate_name or "").strip(),
+        "categories": categories,
+    }
+
+
+NEXT_SYSTEM = (
+    "You are an interview coach driving the conversation ONE question at a time. You receive: "
+    "the JOB DESCRIPTION (the role's must-haves), the CANDIDATE'S RESUME (what they claim), and "
+    "the conversation so far (each prior Q has a verdict from the live evaluator). Produce the "
+    "single next question to ask the candidate.\n"
+    "Hard rules:\n"
+    "- Every question MUST be anchored in BOTH the JD and the resume. The interview's job is to "
+    "test whether what the resume CLAIMS actually meets what the JD REQUIRES. So each question "
+    "should connect a SPECIFIC JD requirement to a SPECIFIC resume claim (e.g. \"The JD asks for "
+    "X — your resume says you did Y at Z. Walk me through how you …\"). When the JD is empty, "
+    "anchor purely in the resume; when the resume is empty, anchor purely in the JD.\n"
+    "- NEVER ask generic questions. If you can't tie the question to a concrete detail from BOTH "
+    "documents (or from the candidate's last answer), it's not specific enough — rework it.\n"
+    "- Prioritise the JD's MUST-HAVE skills first. Don't burn early questions on resume claims "
+    "that aren't relevant to the role.\n"
+    "- ROTATE TOPICS. Do NOT keep drilling the same skill / tool / project. After at most 1-2 "
+    "questions on a given topic, move to a DIFFERENT JD requirement that hasn't been covered.\n"
+    "- Pace through phases in order: 'Opener' (one warm-up tying their background to the role), "
+    "'Skills' (verify each JD must-have against the resume — one question per skill), "
+    "'Technical Deep-Dive' (drill into a project the resume claims, evaluated against the JD's "
+    "depth requirements), 'Experience' (behavioural / impact that the JD calls out). Switch "
+    "phases when the current one has enough signal.\n"
+    "- Only use 'Follow-up' if the LAST answer was Weak / Vague / Off-topic AND the topic is "
+    "genuinely worth probing once more. Don't follow up more than once on the same topic; if "
+    "they couldn't answer, MOVE ON to a different JD requirement.\n"
+    "- After ~6-9 substantive Q&As covering the JD's main must-haves with reasonable topic "
+    "spread, OR when there's enough signal to decide, set done=true with question=\"\".\n"
+    "Respond ONLY as JSON with this exact shape:\n"
+    '{"category": one of "Opener"|"Skills"|"Technical Deep-Dive"|"Experience"|"Follow-up"|"Wrap-up", '
+    '"question": str (empty if done), "done": bool}.'
+)
+
+
+@app.post("/assist/next")
+async def assist_next(req: Request):
+    """Return the single next question to ask, given resume + JD + conversation history."""
+    if openai_client is None:
+        return {"ok": False, "error": "OPENAI_API_KEY not set on the server."}
+    data = await req.json()
+    session = ASSIST_SESSIONS.get(data.get("sessionId", "")) or {}
+    history = data.get("history") or []
+
+    parts = []
+    for i, h in enumerate(history, 1):
+        cat = (h.get("category") or "").strip() or "?"
+        verdict = (h.get("verdict") or "—").strip()
+        q = (h.get("question") or "").strip()
+        ans = (h.get("answer") or "").strip()
+        parts.append(f"Q{i} [{cat}] (verdict: {verdict}): {q}\nA{i}: {ans}")
+    history_text = "\n\n".join(parts) or "(none — this is the opener)"
+
+    user = (
+        f"JOB DESCRIPTION:\n{session.get('jd') or '(none)'}\n\n"
+        f"CANDIDATE RESUME:\n{session.get('resume') or '(none)'}\n\n"
+        f"CONVERSATION SO FAR:\n{history_text}"
+    )
+    result = await _gpt_json(NEXT_SYSTEM, user)
+    return {
+        "ok": True,
+        "category": (result.get("category") or "").strip(),
+        "question": (result.get("question") or "").strip(),
+        "done": bool(result.get("done")),
+    }
+
+
+FINAL_SYSTEM = (
+    "You are a senior interview evaluator producing the FINAL evaluation of a candidate after "
+    "the interview is complete. You receive: the job description, the candidate's resume, and "
+    "the full interview transcript (every Q with its answer and the live evaluator's verdict).\n"
+    "Be honest and calibrated — don't inflate, don't deflate. Ground every claim in something "
+    "the candidate actually said. If the interview was very short, lower confidence and prefer "
+    "'Borderline' over a strong verdict.\n"
+    "Score each dimension on 0-100:\n"
+    "  - communication: clarity, structure, conciseness.\n"
+    "  - relevance:     answered the questions asked, not adjacent topics.\n"
+    "  - depth:         concrete examples, technical detail, real understanding.\n"
+    "  - skills_match:  alignment of demonstrated skills with the JD's must-haves.\n"
+    "  - overall:       your overall hire-recommendation score (NOT just the average).\n"
+    "Respond ONLY as JSON with this exact shape:\n"
+    '{"score": {"overall": int, "communication": int, "relevance": int, "depth": int, '
+    '"skills_match": int}, '
+    '"verdict": one of "Strong Hire"|"Hire"|"Lean Hire"|"Borderline"|"Lean No Hire"|"No Hire", '
+    '"summary": str (2-3 sentences explaining the score), '
+    '"strengths": [up to 3 concrete strengths grounded in the conversation], '
+    '"concerns": [up to 3 concrete concerns or gaps grounded in the conversation]}.'
+)
+
+
+@app.post("/assist/final")
+async def assist_final(req: Request):
+    """Generate the final candidate evaluation from the full interview history."""
+    if openai_client is None:
+        return {"ok": False, "error": "OPENAI_API_KEY not set on the server."}
+    data = await req.json()
+    session = ASSIST_SESSIONS.get(data.get("sessionId", "")) or {}
+    history = data.get("history") or []
+
+    parts = []
+    for i, h in enumerate(history, 1):
+        cat = (h.get("category") or "?").strip() or "?"
+        verdict = (h.get("verdict") or "—").strip()
+        q = (h.get("question") or "").strip()
+        ans = (h.get("answer") or "").strip()
+        parts.append(f"Q{i} [{cat}] (live verdict: {verdict}): {q}\nA{i}: {ans}")
+    interview_text = "\n\n".join(parts) or "(no questions asked)"
+
+    user = (
+        f"JOB DESCRIPTION:\n{session.get('jd') or '(none)'}\n\n"
+        f"CANDIDATE RESUME:\n{session.get('resume') or '(none)'}\n\n"
+        f"FULL INTERVIEW:\n{interview_text}"
+    )
+    result = await _gpt_json(FINAL_SYSTEM, user)
+    score = result.get("score") or {}
+    out = {
+        "ok": True,
+        "verdict": (result.get("verdict") or "").strip(),
+        "summary": (result.get("summary") or "").strip(),
+        "strengths": result.get("strengths") or [],
+        "concerns": result.get("concerns") or [],
+        "score": {
+            "overall":       _safe_int(score.get("overall")),
+            "communication": _safe_int(score.get("communication")),
+            "relevance":     _safe_int(score.get("relevance")),
+            "depth":         _safe_int(score.get("depth")),
+            "skills_match":  _safe_int(score.get("skills_match")),
+        },
+    }
+
+    # Persist to the saved interview row so the library reflects the final read.
+    session_id = data.get("sessionId", "")
+    if session_id:
+        await asyncio.to_thread(
+            db.save_analysis, session_id,
+            out["score"], out["summary"], [],
+            ASSIST_SESSIONS.get(session_id, {}).get("fields", _blank_fields()),
+            {"verdict": out["verdict"], "rationale": out["summary"]},
+            out["concerns"],
+        )
+    return out
+
+
+def _safe_int(v):
+    try: return int(v)
+    except (TypeError, ValueError): return None
+
+
+@app.post("/assist/verify")
+async def assist_verify(req: Request):
+    """Evaluate a candidate's answer to a specific question; return verdict + follow-up."""
+    if openai_client is None:
+        return {"ok": False, "error": "OPENAI_API_KEY not set on the server."}
+    data = await req.json()
+    question = (data.get("question") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    if not question:
+        return {"ok": False, "error": "A question is required."}
+    if not answer:
+        return {"ok": True, "satisfied": False, "verdict": "Vague",
+                "feedback": "No answer captured yet.", "followUp": ""}
+
+    session = ASSIST_SESSIONS.get(data.get("sessionId", "")) or {}
+    user = (
+        f"JOB DESCRIPTION:\n{session.get('jd') or '(none)'}\n\n"
+        f"CANDIDATE RESUME:\n{session.get('resume') or '(none)'}\n\n"
+        f"QUESTION ASKED:\n{question}\n\n"
+        f"CANDIDATE'S ANSWER:\n{answer[:6000]}"
+    )
+    result = await _gpt_json(VERIFY_SYSTEM, user)
+    return {
+        "ok": True,
+        "satisfied": bool(result.get("satisfied")),
+        "verdict": result.get("verdict", ""),
+        "feedback": result.get("feedback", ""),
+        "followUp": result.get("followUp", ""),
+    }
+
+
 @app.post("/assist/start")
 async def assist_start(
     jd_text: str = Form(""),

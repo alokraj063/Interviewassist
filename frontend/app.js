@@ -10,7 +10,7 @@
 const WS_BASE = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream`;
 
 const els = {
-  start: document.getElementById('startBtn'),
+  // start: removed — assist.js's single "Start interview" button drives the flow now.
   stop: document.getElementById('stopBtn'),
   clear: document.getElementById('clearBtn'),
   copy: document.getElementById('copyBtn'),
@@ -279,8 +279,7 @@ async function startPhoneSession() {
     });
   } catch (err) {
     showBanner(micErrorMessage(err));
-    els.start.disabled = false;
-    return;
+    throw err;
   }
 
   sessionId = window.ensureInterview ? await window.ensureInterview() : makeSessionId();
@@ -302,7 +301,7 @@ async function startSession() {
   // undefined — fail with a clear instruction instead of a cryptic TypeError.
   if (captureUnavailable()) return;
 
-  els.start.disabled = true;
+  // start button is no longer in the DOM (see els declaration); assist.js drives this.
 
   if (currentMode() === 'phone') {
     await startPhoneSession();
@@ -347,8 +346,7 @@ async function startSession() {
       ? micErrorMessage(micErr)
       : 'No audio captured. Pick the Teams / Zoom / Meet / FreJun tab and tick "Share tab audio".';
     showBanner(msg);
-    els.start.disabled = false;
-    return;
+    throw new Error(msg);
   }
 
   // One interview id ties the transcript file, co-pilot session, and saved record.
@@ -384,13 +382,14 @@ function stopSession() {
     if (session.phone) session.phone.stop();
     session = null;
   }
-  els.start.disabled = false;
   els.stop.disabled = true;
   showBanner('');
   // Mark the interview ended and free the binding so the next candidate gets a
   // fresh interview (the saved transcript stays on screen until then).
   if (window.endInterview) window.endInterview();
 }
+window.stopListening = stopSession;
+window.startListening = startSession;
 
 // Clear the live transcript + log (used by the Clear button and when a new
 // interview starts). Exposed for assist.js's ensureInterview().
@@ -413,7 +412,6 @@ function updateModeUI() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
-els.start.addEventListener('click', startSession);
 els.stop.addEventListener('click', stopSession);
 document.querySelectorAll('input[name="callMode"]').forEach((r) =>
   r.addEventListener('change', updateModeUI));
