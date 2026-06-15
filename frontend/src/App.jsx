@@ -51,6 +51,9 @@ export default function App() {
       return;
     }
     setStarting(true);
+    // Starting a new call is the only thing that clears the previous call's data
+    // (snapshot, Q&A history, final summary). audio.start() clears the transcript.
+    flow.reset();
     try {
       // 1) Audio capture (browser will prompt for mic + tab share)
       await audio.start({ mode: callMode });
@@ -65,10 +68,25 @@ export default function App() {
     }
   }, [audio, callMode, flow, resumeFile]);
 
-  const handleStop = useCallback(() => {
+  // Ending a call: generate the final summary/score (persisted to the saved interview
+  // row), THEN tear down capture and mark the interview ended in the DB. We deliberately
+  // do NOT reset the flow here — the snapshot, Q&A history, transcript and final summary
+  // stay on screen so the recruiter can review the last call until they start a new one.
+  // Order matters: endNow() runs /assist/final while the in-memory session (JD + resume
+  // context) is still alive; audio.stop() then drops that session and sets ended_at.
+  const endCall = useCallback(async () => {
+    await flow.endNow();
     audio.stop();
-    flow.reset();
   }, [audio, flow]);
+
+  // If the flow finalises on its own (the model decided it had enough signal and
+  // generated the final score), make sure capture is torn down and the interview is
+  // marked ended too — without resetting the now-visible last-call data.
+  useEffect(() => {
+    if (flow.finalScore && (audio.micState === 'live' || audio.callState === 'live')) {
+      audio.stop();
+    }
+  }, [flow.finalScore, audio.micState, audio.callState, audio]);
 
   const handleCopyTranscript = useCallback(async () => {
     const text = audio.transcriptLog.map((t) => `${t.speaker}: ${t.text}`).join('\n');
@@ -93,7 +111,7 @@ export default function App() {
             livePreviews={audio.livePreviews}
             onCopy={handleCopyTranscript}
             onClear={audio.clearTranscript}
-            onStop={handleStop}
+            onStop={endCall}
             stopDisabled={!running}
           />
           <AssistPanel
@@ -111,7 +129,7 @@ export default function App() {
             status={flow.status}
             onSkip={flow.skip}
             onMarkAnswered={flow.markAnswered}
-            onEndScore={flow.endNow}
+            onEndScore={endCall}
             onForceTick={flow.forceTick}
           />
         </main>
