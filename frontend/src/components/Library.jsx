@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import FinalScoreCard from './FinalScoreCard.jsx';
 
 function speakerClass(speaker) {
   const s = (speaker || '').toLowerCase();
@@ -88,10 +89,11 @@ export default function Library() {
             </div>
             {detail.summary && (
               <section className="card">
-                <div className="card__title">Summary</div>
+                <div className="card__title">Pre-call snapshot</div>
                 <p className="snapshot">{detail.summary}</p>
               </section>
             )}
+            {hasFinal(detail.final) && <FinalScoreCard finalScore={detail.final} />}
             {detail.turns && detail.turns.length > 0 && (
               <section className="card">
                 <div className="card__title">Transcript</div>
@@ -113,6 +115,12 @@ export default function Library() {
       </section>
     </main>
   );
+}
+
+// True when a saved interview has a stored end-of-call evaluation worth rendering.
+function hasFinal(f) {
+  if (!f) return false;
+  return Boolean(f.summary || f.verdict || (f.score && f.score.overall != null));
 }
 
 function groupBy(list) {

@@ -95,6 +95,7 @@ def init_db() -> None:
                 rec_verdict         TEXT NOT NULL DEFAULT '',
                 rec_rationale       TEXT NOT NULL DEFAULT '',
                 red_flags           TEXT NOT NULL DEFAULT '[]',
+                final_json          TEXT NOT NULL DEFAULT '{}',
                 started_at          TEXT NOT NULL,
                 ended_at            TEXT
             );
@@ -112,6 +113,7 @@ def init_db() -> None:
             ("rec_verdict", "TEXT NOT NULL DEFAULT ''"),
             ("rec_rationale", "TEXT NOT NULL DEFAULT ''"),
             ("red_flags", "TEXT NOT NULL DEFAULT '[]'"),
+            ("final_json", "TEXT NOT NULL DEFAULT '{}'"),
         ]
         for col, decl in _migrations:
             try:
@@ -262,6 +264,7 @@ def save_analysis(
     fields: dict,
     recommendation: dict | None = None,
     red_flags: list[str] | None = None,
+    final: dict | None = None,
 ) -> None:
     score = score or {}
     recommendation = recommendation or {}
@@ -276,7 +279,7 @@ def save_analysis(
         _db().execute(
             "UPDATE interviews SET score_overall = ?, score_comm = ?, score_relevance = ?, "
             "score_depth = ?, feedback = ?, suggested_questions = ?, fields_json = ?, "
-            "rec_verdict = ?, rec_rationale = ?, red_flags = ? WHERE id = ?",
+            "rec_verdict = ?, rec_rationale = ?, red_flags = ?, final_json = ? WHERE id = ?",
             (
                 _i(score.get("overall")),
                 _i(score.get("communication")),
@@ -288,6 +291,7 @@ def save_analysis(
                 str(recommendation.get("verdict") or ""),
                 str(recommendation.get("rationale") or ""),
                 json.dumps(red_flags or []),
+                json.dumps(final or {}),
                 interview_id,
             ),
         )
@@ -376,5 +380,8 @@ def get_interview(interview_id: str) -> dict | None:
         "relevance": d.get("score_relevance"),
         "depth": d.get("score_depth"),
     }
+    # Full end-of-call evaluation (same shape /assist/final returns) so the library can
+    # render the identical final flashcard the recruiter saw live.
+    d["final"] = json.loads(d.get("final_json") or "{}")
     d["turns"] = _read_turns(d.get("transcript_file", ""))
     return d

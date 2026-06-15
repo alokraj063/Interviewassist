@@ -571,6 +571,7 @@ async def assist_final(req: Request):
             ASSIST_SESSIONS.get(session_id, {}).get("fields", _blank_fields()),
             {"verdict": out["verdict"], "rationale": out["summary"]},
             out["concerns"],
+            out,  # full final evaluation -> final_json, so the library shows the same flashcard
         )
     return out
 
