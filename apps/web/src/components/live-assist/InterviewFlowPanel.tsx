@@ -129,7 +129,17 @@ export function InterviewFlowPanel({
               <span className="text-sm font-semibold">Final: {finalScore.verdict}</span>
               <span className="text-2xl font-bold tabular-nums">{finalScore.score.overall ?? "—"}</span>
             </div>
+            {finalScore.saved && (
+              <div className="text-[10px] text-emerald-600 inline-flex items-center gap-1 mb-1">
+                <Check className="w-3 h-3" /> Saved to the call record
+              </div>
+            )}
             {finalScore.summary && <p className="text-xs text-muted-foreground mb-2">{finalScore.summary}</p>}
+            {finalScore.concerns?.length > 0 && (
+              <div className="text-[11px] text-muted-foreground mb-2">
+                <span className="font-medium">Concerns: </span>{finalScore.concerns.join(" · ")}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-1 text-[11px]">
               {(["communication", "relevance", "depth", "skills_match"] as const).map((k) => (
                 <div key={k} className="flex justify-between">

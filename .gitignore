@@ -46,3 +46,36 @@ test-results/
 *.njsproj
 *.sln
 *.sw?
+
+# Testing
+.nyc_output/
+coverage/
+.vitestcache/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/.auth/
+
+# Docker
+docker-compose.override.yml
+postgres_data/
+redis_data/
+
+# Electron app builds
+apps/desktop/out/
+apps/desktop/dist/
+apps/desktop/preload.js
+
+# Build caches
+.eslintcache
+.turbo/
+
+# pnpm specific
+.pnpm-lock.yaml
+pnpm-store/
+
+# Temp files and misc
+*.tmp
+*.temp
+tmp/
+temp/
+.cache/
