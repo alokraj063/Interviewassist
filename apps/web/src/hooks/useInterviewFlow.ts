@@ -56,6 +56,16 @@ const SILENCE_MS = 1800;
 const SAFETY_TICK_MS = 9000;
 const MIN_ANSWER_CHARS = 20;
 const ADVANCE_LOCK_MS = 1500;
+const DETECT_MIN_MS = 2500; // throttle the "did the recruiter ask their own Q?" detector
+
+// Loose equality so we don't re-sync to essentially the same question.
+function sameQuestion(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
 
 const VERDICT_KIND: Record<string, "ok" | "weak" | "bad"> = {
   Strong: "ok",
@@ -90,6 +100,9 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
     ticking: false,
     fetchingNext: false,
     advanceLockUntil: 0,
+    lastDetectLen: 0,
+    detecting: false,
+    detectLockUntil: 0,
     silenceTimer: null as ReturnType<typeof setTimeout> | null,
     safetyTimer: null as ReturnType<typeof setInterval> | null,
     watcherTimer: null as ReturnType<typeof setInterval> | null,
@@ -121,7 +134,16 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
     try {
       const data = await apiFetch<{ ok: boolean; category: string; question: string; done: boolean; error?: string }>(
         "/api/assist/next",
-        { method: "POST", json: { callId: s.callId, history: useHistory } },
+        {
+          method: "POST",
+          json: {
+            callId: s.callId,
+            history: useHistory,
+            // Last ~10 turns of the actual conversation so the next question
+            // follows on in context instead of being picked blindly.
+            transcript: (s.transcriptLog || []).slice(-10).map((t) => ({ speaker: t.speaker, text: t.text })),
+          },
+        },
       );
       if (!data.ok) { setStatus({ text: data.error || "Could not get the next question.", kind: "error" }); return; }
       if (data.done || !data.question) { await finish("Enough signal — generating the final score…"); return; }
@@ -131,6 +153,7 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
       s.currentStartLen = (s.transcriptLog || []).length;
       s.lastTickedLen = s.currentStartLen;
       s.lastSeenLen = s.currentStartLen;
+      s.lastDetectLen = s.currentStartLen;
       setLatest(null);
       setStatus({ text: "Live — ask the question. I'll auto-advance once they answer.", kind: "ok" });
     } catch {
@@ -190,6 +213,48 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
     }
   }, [advance, capturedAnswer]);
 
+  // Detect when the recruiter asks a NEW (off-script) question and sync the
+  // current question to it. Content-based on the backend (speaker labels are
+  // unreliable on the mixed mic), throttled to limit cost.
+  const detectQuestion = useCallback(async () => {
+    const s = st.current;
+    if (!s.callId || !s.current || !s.running || s.detecting || s.fetchingNext) return;
+    if (Date.now() < s.detectLockUntil) return;
+    const log = s.transcriptLog || [];
+    if (log.length === s.lastDetectLen) return;
+    s.lastDetectLen = log.length;
+    s.detectLockUntil = Date.now() + DETECT_MIN_MS;
+    s.detecting = true;
+    try {
+      const data = await apiFetch<{ ok: boolean; asked: boolean; question: string; category: string }>(
+        "/api/assist/detect-question",
+        {
+          method: "POST",
+          json: {
+            callId: s.callId,
+            currentQuestion: s.current.question,
+            transcript: log.slice(-12).map((t) => ({ speaker: t.speaker, text: t.text })),
+          },
+        },
+      );
+      if (data.ok && data.asked && data.question && !sameQuestion(data.question, s.current.question)) {
+        const c: CurrentQuestion = { category: data.category || "Recruiter asked", question: data.question };
+        setCurrent(c); s.current = c;
+        // Reset the answer window to now so the candidate's reply to THIS
+        // question is what gets verified.
+        s.currentStartLen = (s.transcriptLog || []).length;
+        s.lastTickedLen = s.currentStartLen;
+        s.advanceLockUntil = Date.now() + ADVANCE_LOCK_MS;
+        setLatest(null);
+        setStatus({ text: "Caught up to the question you asked.", kind: "ok" });
+      }
+    } catch {
+      /* non-fatal */
+    } finally {
+      s.detecting = false;
+    }
+  }, []);
+
   const watcher = useCallback(() => {
     const s = st.current;
     if (!s.running || !s.current) return;
@@ -197,11 +262,14 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
     if (log.length === s.lastSeenLen) return;
     const newTurns = log.slice(s.lastSeenLen);
     s.lastSeenLen = log.length;
+    // Always check whether the recruiter went off-script with their own
+    // question (don't depend on the speaker label being right).
+    void detectQuestion();
     const recruiterSpoke = newTurns.some((t) => isRecruiter(t.speaker));
     if (s.silenceTimer) clearTimeout(s.silenceTimer);
     if (recruiterSpoke) void tick();
     else s.silenceTimer = setTimeout(() => void tick(), SILENCE_MS);
-  }, [tick]);
+  }, [tick, detectQuestion]);
 
   const finish = useCallback(async (msg?: string) => {
     const s = st.current;
@@ -288,6 +356,7 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
     s.currentStartLen = (s.transcriptLog || []).length;
     s.lastTickedLen = s.currentStartLen;
     s.lastSeenLen = s.currentStartLen;
+    s.lastDetectLen = s.currentStartLen;
     s.advanceLockUntil = 0;
     setLatest(null);
     if (!s.running) { setRunning(true); s.running = true; }
@@ -303,6 +372,7 @@ export function useInterviewFlow(transcriptLog: FlowTurn[]) {
       callId: null, current: null, history: [], running: false,
       currentStartLen: 0, lastSeenLen: 0, lastTickedLen: 0,
       ticking: false, fetchingNext: false, advanceLockUntil: 0,
+      lastDetectLen: 0, detecting: false, detectLockUntil: 0,
       silenceTimer: null, safetyTimer: null, watcherTimer: null,
     });
     setCallId(null); setSnapshot(null); setPlan([]); setCurrent(null);

@@ -28,6 +28,7 @@ import {
   demands as demandsTable,
 } from "@j2w/db";
 import { chatModel, env } from "../env.js";
+import { recordUsage, usageSummary } from "../usage/tracker.js";
 
 let _client: OpenAI | null = null;
 function openai(): OpenAI {
@@ -38,15 +39,29 @@ function openai(): OpenAI {
   return _client;
 }
 
-async function gptJson(system: string, user: string): Promise<Record<string, unknown>> {
+// `track` (orgId + operation [+ callId]) records the call's token usage + cost.
+async function gptJson(
+  system: string,
+  user: string,
+  track: { orgId: string; operation: string; callId?: string | null },
+): Promise<Record<string, unknown>> {
+  const model = chatModel();
   const resp = await openai().chat.completions.create({
-    model: chatModel(),
+    model,
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
     ],
     response_format: { type: "json_object" },
     temperature: 0.3,
+  });
+  void recordUsage({
+    orgId: track.orgId,
+    callId: track.callId ?? null,
+    operation: track.operation,
+    model,
+    promptTokens: resp.usage?.prompt_tokens ?? 0,
+    completionTokens: resp.usage?.completion_tokens ?? 0,
   });
   try {
     return JSON.parse(resp.choices[0]?.message?.content ?? "{}") as Record<string, unknown>;
@@ -152,8 +167,14 @@ const PLAN_SYSTEM = `You are an interview architect + a sharp, honest screener. 
 
 (1) A calibrated pre-call FIT read, judged ONLY against the JD's core must-haves. Be evidence-based and skeptical, not flattering. If info is thin, use "Not enough info" rather than inflating.
 
-(2) A structured, personalized question plan. Group questions into categories in this exact order: "Skills" (verify the skills/tools claimed), "Technical Deep-Dive" (probe core projects + technical reasoning), "Experience" (behavioural / impact). Every question must reference a SPECIFIC detail from the JD or the candidate profile — never generic "tell me about a time". 2-3 questions per category, 6-9 total.
-- BREVITY IS CRITICAL: each question must be ONE short, natural spoken sentence the recruiter can read aloud — max ~16 words. No preamble ("I see that…", "Can you walk me through…"), no multi-part or stacked-clause questions. Just the direct question.
+(2) A TECHNICAL question bank tailored to THIS candidate and role. Generate EXACTLY 20 questions that test the role's required technologies and the specific skills, tools, and projects on the resume.
+
+Hard rules for the questions:
+- TECHNICAL and CONCRETE only. Every question must name a specific technology, tool, framework, concept, algorithm, or a project/claim from the resume or a must-have from the JD. NEVER vague ("tell me about your experience", "what are your strengths", "describe a challenge") — those are banned.
+- Anchor in BOTH the JD's required tech stack AND the candidate's resume. If the JD requires X and the resume claims Y, ask pointed questions about X and probe the depth of Y.
+- Group into EXACTLY three difficulty buckets by "name": "Easy" (core fundamentals / definitions / warm-up on the required tech), "Medium" (applied/practical usage, trade-offs, "how would you…" on real tasks), "Hard" (internals, system design, debugging, scaling, edge cases). Distribute roughly 6 Easy, 8 Medium, 6 Hard — 20 questions total.
+- Each question is ONE clear sentence a recruiter can read aloud — max ~20 words. No preamble, no multi-part/stacked-clause questions.
+- ALWAYS produce all 20 even if the fit is weak — probe whether they actually have each required skill. Never return empty "questions" arrays.
 
 All output text MUST be in English.
 
@@ -162,12 +183,17 @@ Respond ONLY as JSON with this exact shape:
  "summary": str (2-3 sentences on must-haves met vs missed),
  "strengths": [up to 3 concrete strengths vs the JD],
  "gaps": [up to 3 concrete missing/unclear must-haves to probe],
- "categories": [{"name": str, "questions": [str, ...]}, ...]}`;
+ "categories": [{"name": "Easy"|"Medium"|"Hard", "questions": [str, ...]}, ...]}`;
 
-const NEXT_SYSTEM = `You are an interview coach driving the conversation ONE question at a time. You receive the JOB DESCRIPTION, the CANDIDATE profile/resume, and the conversation so far (each prior Q has a verdict from the live evaluator). Produce the single next question to ask.
+const NEXT_SYSTEM = `You are an interview coach driving the conversation ONE question at a time. You receive the JOB DESCRIPTION, the CANDIDATE profile/resume, the structured Q&A so far (for coverage), and the RECENT TRANSCRIPT (the verbatim last ~10 turns of the actual conversation). Produce the single next question to ask.
+
+CONTEXT IS CRITICAL — never produce a random question:
+- READ the RECENT TRANSCRIPT first. The next question must FOLLOW ON naturally from what was just said. If the candidate's last answer opened a thread, raised a tool/project, gave a partial or weak answer, or said something worth drilling into, probe THAT specifically.
+- Use the structured Q&A history only to avoid repeating covered ground and to track coverage of the JD must-haves. Use the recent transcript for the immediate, in-context next move.
+- If the conversation just moved to a new topic, continue on that topic rather than snapping back to an unrelated planned question.
 
 Hard rules:
-- Anchor every question in a SPECIFIC JD requirement AND/OR a specific candidate detail. Never generic.
+- Anchor every question in a SPECIFIC JD requirement AND/OR a specific candidate detail or something they JUST said. Never generic.
 - Prioritise the JD's MUST-HAVE skills first.
 - ROTATE TOPICS — after 1-2 questions on a topic, move to a different uncovered JD requirement.
 - Pace through phases in order: "Opener" (one warm-up tying their background to the role), "Skills" (verify each JD must-have), "Technical Deep-Dive" (drill into a claimed project), "Experience" (behavioural / impact).
@@ -222,6 +248,30 @@ function fmtHistory(history: Array<{ category?: string; question?: string; answe
     .join("\n\n");
 }
 
+// Detects when the interviewer asks a NEW question off-script. Judges from
+// CONTENT, not speaker labels (the mixed-mic diarization is unreliable).
+const DETECT_SYSTEM = `You watch a LIVE interview transcript and decide whether the INTERVIEWER (recruiter) has just asked a NEW question to the candidate.
+
+CRITICAL: the speaker labels in the transcript may be WRONG — it's a single mixed microphone. Do NOT trust the labels. Judge from CONTENT and conversational role:
+- The INTERVIEWER asks questions that probe the candidate (about their experience, skills, projects, decisions). Usually phrased as a question or a request ("tell me about…", "how did you…", "what is…").
+- The CANDIDATE answers — describing what THEY did, their experience, opinions.
+
+You are given the CURRENT planned question and the most recent transcript turns. Decide:
+- Has the interviewer, in the latest turn(s), asked a question to the candidate that is MATERIALLY DIFFERENT from the CURRENT question (a different topic/skill, or a clearly different ask)? Ignore acknowledgements, small talk, restating the same question, or the candidate speaking.
+- If yes: return asked=true with "question" = the question the interviewer actually asked, cleaned into ONE short, clear sentence (max ~16 words), and a short "category" (e.g. "Recruiter asked", "Skills", "Follow-up").
+- If the latest turns are just the candidate answering, or the interviewer asked essentially the SAME current question, or nothing question-like was asked: asked=false with question="".
+
+Respond ONLY as JSON: {"asked": bool, "question": str, "category": str}`;
+
+const detectSchema = z.object({
+  callId: z.string().uuid(),
+  currentQuestion: z.string().default(""),
+  transcript: z
+    .array(z.object({ speaker: z.string().default(""), text: z.string() }))
+    .max(40)
+    .default([]),
+});
+
 const historySchema = z.array(
   z.object({
     category: z.string().optional(),
@@ -243,7 +293,7 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const user = `JOB DESCRIPTION:\n${ctx.jd || "(none provided)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none provided)"}`;
-    const result = await gptJson(PLAN_SYSTEM, user);
+    const result = await gptJson(PLAN_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "plan", callId: body.data.callId });
     return {
       ok: true,
       candidateName: ctx.candidateName,
@@ -255,18 +305,30 @@ export async function assistRoutes(app: FastifyInstance) {
     };
   });
 
-  // The single next question to ask, given the conversation so far.
+  // The single next question to ask, given the conversation so far + the live
+  // transcript of the last several turns (so follow-ups stay in context).
   app.post("/next", async (req, reply) => {
     if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
     const body = z
-      .object({ callId: z.string().uuid(), history: historySchema.default([]) })
+      .object({
+        callId: z.string().uuid(),
+        history: historySchema.default([]),
+        transcript: z
+          .array(z.object({ speaker: z.string().default(""), text: z.string() }))
+          .max(40)
+          .default([]),
+      })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
     const ctx = await loadJdResume(body.data.callId, req.authUser!.orgId);
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
-    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nCONVERSATION SO FAR:\n${fmtHistory(body.data.history)}`;
-    const result = await gptJson(NEXT_SYSTEM, user);
+    const recent = body.data.transcript
+      .slice(-10)
+      .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
+      .join("\n");
+    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nQ&A SO FAR (coverage):\n${fmtHistory(body.data.history)}\n\nRECENT TRANSCRIPT (last turns, verbatim — use for immediate context; labels may be imperfect):\n${recent || "(nothing spoken yet)"}`;
+    const result = await gptJson(NEXT_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "next", callId: body.data.callId });
     return {
       ok: true,
       category: ((result.category as string) ?? "").trim(),
@@ -288,13 +350,38 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
 
     const user = `CURRENT QUESTION:\n${body.data.question}\n\nCANDIDATE ANSWER SO FAR:\n${body.data.answer || "(nothing substantive yet)"}`;
-    const result = await gptJson(VERIFY_SYSTEM, user);
+    const result = await gptJson(VERIFY_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "verify", callId: body.data.callId });
     return {
       ok: true,
       satisfied: Boolean(result.satisfied),
       verdict: ((result.verdict as string) ?? "Off-topic").trim(),
       feedback: ((result.feedback as string) ?? "").trim(),
       followUp: ((result.followUp as string) ?? "").trim(),
+    };
+  });
+
+  // Did the interviewer just ask a NEW (off-script) question? Content-based.
+  app.post("/detect-question", async (req, reply) => {
+    if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
+    const body = detectSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
+    if (body.data.transcript.length === 0) return { ok: true, asked: false, question: "", category: "" };
+
+    const lines = body.data.transcript
+      .slice(-12)
+      .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
+      .join("\n");
+    const user = `CURRENT QUESTION: ${body.data.currentQuestion || "(none yet)"}\n\nRECENT TRANSCRIPT (labels may be wrong — judge by content):\n${lines}`;
+    const result = await gptJson(DETECT_SYSTEM, user, {
+      orgId: req.authUser!.orgId,
+      operation: "detect",
+      callId: body.data.callId,
+    });
+    return {
+      ok: true,
+      asked: Boolean(result.asked),
+      question: ((result.question as string) ?? "").trim(),
+      category: ((result.category as string) ?? "Recruiter asked").trim(),
     };
   });
 
@@ -309,7 +396,7 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL INTERVIEW:\n${fmtHistory(body.data.history)}`;
-    const result = await gptJson(FINAL_SYSTEM, user);
+    const result = await gptJson(FINAL_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "final", callId: body.data.callId });
 
     const evaluation = {
       kind: "interview_eval" as const,
@@ -348,5 +435,12 @@ export async function assistRoutes(app: FastifyInstance) {
     const evalData = call.summary as { kind?: string } | null;
     if (!evalData || evalData.kind !== "interview_eval") return { ok: true, evaluation: null };
     return { ok: true, evaluation: evalData };
+  });
+
+  // Token-usage + cost summary for the Live Assist co-pilot (this org).
+  app.get<{ Querystring: { days?: string } }>("/usage", async (req) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const summary = await usageSummary(req.authUser!.orgId, days);
+    return { ok: true, ...summary };
   });
 }

@@ -31,7 +31,7 @@ export default function LiveAssistSettings() {
     return Array.from(seen, ([id, name]) => ({ id, name }));
   }, [demands]);
 
-  const [tab, setTab] = useState<"candidates" | "jobs">("candidates");
+  const [tab, setTab] = useState<"jd" | "resume">("jd");
   const [resumeModal, setResumeModal] = useState(false);
 
   return (
@@ -40,8 +40,8 @@ export default function LiveAssistSettings() {
         <Link to="/live-assist" className="text-xs text-muted-foreground inline-flex items-center gap-1 hover:text-foreground">
           <ArrowLeft className="w-3.5 h-3.5" /> Back to Live Assist
         </Link>
-        <h1 className="text-xl font-semibold mt-1">Live Assist · Settings</h1>
-        <p className="text-sm text-muted-foreground">Add candidates and jobs to interview against.</p>
+        <h1 className="text-xl font-semibold mt-1">JD & Résumé</h1>
+        <p className="text-sm text-muted-foreground">Add the job (JD) and the candidate (résumé) to interview against.</p>
       </div>
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 flex items-start gap-2">
@@ -57,8 +57,8 @@ export default function LiveAssistSettings() {
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border">
         {([
-          { id: "candidates", label: "Candidates", icon: UserPlus },
-          { id: "jobs", label: "Jobs (JD)", icon: Briefcase },
+          { id: "jd", label: "JD (Job)", icon: Briefcase },
+          { id: "resume", label: "Résumé (Candidate)", icon: UserPlus },
         ] as const).map((t) => (
           <button
             key={t.id}
@@ -72,7 +72,15 @@ export default function LiveAssistSettings() {
         ))}
       </div>
 
-      {tab === "candidates" && (
+      {tab === "jd" && (
+        <AddJobCard
+          disabled={!canCreateDemand}
+          clients={clients}
+          onCreated={() => qc.invalidateQueries({ queryKey: ["demands"] })}
+        />
+      )}
+
+      {tab === "resume" && (
         <div className="space-y-3">
           <div className="flex justify-end">
             <Button size="sm" variant="outline" disabled={!canCreateCandidate} onClick={() => setResumeModal(true)}>
@@ -81,14 +89,6 @@ export default function LiveAssistSettings() {
           </div>
           <AddCandidateCard disabled={!canCreateCandidate} onCreated={() => qc.invalidateQueries({ queryKey: ["candidates"] })} />
         </div>
-      )}
-
-      {tab === "jobs" && (
-        <AddJobCard
-          disabled={!canCreateDemand}
-          clients={clients}
-          onCreated={() => qc.invalidateQueries({ queryKey: ["demands"] })}
-        />
       )}
 
       <CreateCandidateModal

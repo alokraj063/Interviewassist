@@ -4788,3 +4788,24 @@ export const kbAudit = pgTable(
   }),
 );
 // <<< PAGE:knowledge-base END
+
+// ---------- AI token-usage + cost ledger (Live Assist co-pilot) ----------
+export const aiUsageEvents = pgTable(
+  "ai_usage_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    callId: uuid("call_id"),
+    operation: text("operation").notNull(),
+    model: text("model").notNull(),
+    promptTokens: integer("prompt_tokens").notNull().default(0),
+    completionTokens: integer("completion_tokens").notNull().default(0),
+    totalTokens: integer("total_tokens").notNull().default(0),
+    costUsd: numeric("cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byOrg: index("ai_usage_events_org_idx").on(t.orgId, t.createdAt),
+    byCall: index("ai_usage_events_call_idx").on(t.callId),
+  }),
+);

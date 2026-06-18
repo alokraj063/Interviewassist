@@ -18,7 +18,18 @@ import type {
 } from "@j2w/shared-types";
 import type { FastifyBaseLogger } from "fastify";
 import { chatModel, env } from "../env.js";
+import { recordUsage } from "../usage/tracker.js";
 import { broadcastToCall } from "../ws/session.js";
+
+// Cache callId → orgId so the per-turn usage record doesn't re-query each time.
+const orgIdCache = new Map<string, string>();
+async function orgIdForCall(callId: string): Promise<string | null> {
+  const hit = orgIdCache.get(callId);
+  if (hit) return hit;
+  const [row] = await db.select({ orgId: callSessions.orgId }).from(callSessions).where(eq(callSessions.id, callId)).limit(1);
+  if (row?.orgId) orgIdCache.set(callId, row.orgId);
+  return row?.orgId ?? null;
+}
 import { recordRetrieval } from "../routes/kb.js";
 import { retrieve } from "./retrieve.js";
 
@@ -328,14 +339,32 @@ export async function maybeSuggest(
       response_format: { type: "json_schema", json_schema: JSON_SCHEMA },
       // Lower temperature: structured suggestions shouldn't be creative.
       temperature: 0.2,
+      // Emit a final usage chunk so we can record token cost for the Usage tab.
+      stream_options: { include_usage: true },
     });
 
     let full = "";
+    let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
     for await (const chunk of stream) {
+      if (chunk.usage) usage = chunk.usage;
       const delta = chunk.choices[0]?.delta?.content;
       if (!delta) continue;
       full += delta;
       broadcastToCall(callId, { type: "suggestion.delta", requestId, text: delta });
+    }
+    if (usage) {
+      void orgIdForCall(callId).then((orgId) => {
+        if (orgId) {
+          void recordUsage({
+            orgId,
+            callId,
+            operation: "suggestion",
+            model: chatModel(),
+            promptTokens: usage!.prompt_tokens ?? 0,
+            completionTokens: usage!.completion_tokens ?? 0,
+          });
+        }
+      });
     }
 
     let payload: SuggestionPayload;

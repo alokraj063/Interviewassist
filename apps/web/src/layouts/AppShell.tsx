@@ -5,7 +5,7 @@ import {
   Bot, ListChecks, BookOpen, BarChart3, Settings, ChevronsLeft, ChevronsRight,
   Search, Bell, HelpCircle, ChevronDown, LogOut, UserCircle, Building2, Command, Radio,
   GitBranch, Briefcase, UserSearch, Database, ClipboardList, Video, ShieldCheck,
-  Building, FolderSync, Library,
+  Building, FolderSync, Library, Coins, FileText,
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Avatar } from "@/components/ui-kit";
@@ -41,7 +41,8 @@ const NAV_SECTIONS: NavSection[] = [
     title: "Live Assist",
     items: [
       { to: "/live-assist", label: "Live Assist", icon: Headphones, perm: "live_assist.read", end: true },
-      { to: "/live-assist/settings", label: "Settings", icon: Settings },
+      { to: "/live-assist/settings", label: "JD & Résumé", icon: FileText },
+      { to: "/live-assist/usage", label: "Usage & Cost", icon: Coins },
     ],
   },
   // {

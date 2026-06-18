@@ -10,43 +10,17 @@ import { env } from "./env.js";
 import { authRoutes } from "./routes/auth.js";
 import { callsRoutes } from "./routes/calls.js";
 import { assistRoutes } from "./routes/assist.js";
-import { coachingRoutes } from "./routes/coaching.js";
-import { clientPortalRoutes } from "./routes/client-portal.js";
-import {
-  assessmentsRoutes,
-  publicAssessmentRoutes,
-} from "./routes/assessments.js";
-import {
-  asyncVideoRoutes,
-  publicAsyncVideoRoutes,
-} from "./routes/async-video.js";
-import { proctorRoutes } from "./routes/proctor.js";
-import { recruitersRoutes } from "./routes/recruiters.js";
-import { teamMonitorRoutes } from "./routes/team-monitor.js";
-import { analyticsRoutes } from "./routes/analytics.js";
-import { rubricsRoutes } from "./routes/rubrics.js";
-import { sourcingRoutes } from "./routes/sourcing.js";
-import { messagingRoutes } from "./routes/messaging.js";
-import { voiceAgentCampaignRoutes } from "./routes/voice-agent-campaigns.js";
 import { healthRoutes } from "./routes/health.js";
 import { kbRoutes } from "./routes/kb.js";
-import { liveAssistRoutes } from "./routes/live-assist.js";
 import { orgRoutes } from "./routes/org.js";
 import { platformRoutes } from "./routes/platform.js";
-import { qaRoutes } from "./routes/qa.js";
 import { rolesRoutes } from "./routes/roles.js";
 import { candidatesRoutes } from "./routes/candidates.js";
 import { demandsRoutes } from "./routes/demands.js";
 import { prospectsRoutes } from "./routes/prospects.js";
-import { submissionsRoutes } from "./routes/submissions.js";
 import { teamsRoutes } from "./routes/teams.js";
-import { translationRoutes } from "./routes/translation.js";
 import { usersRoutes } from "./routes/users.js";
-import { triageRoutes } from "./routes/triage.js";
-import { vapiWebhookRoutes } from "./routes/vapi-webhooks.js";
-import { voiceAgentsRoutes } from "./routes/voice-agents.js";
 import { questionBanksRoutes } from "./routes/question-banks.js";
-import { adminOfferLetterSyncRoutes } from "./routes/admin/offer-letter-sync.js";
 import { registerAgentWs } from "./ws/agent.js";
 import { registerCustomTranscriberWs } from "./ws/custom-transcriber.js";
 import { registerIngestWs } from "./ws/ingest.js";
@@ -179,34 +153,12 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(candidatesRoutes, { prefix: "/api/candidates" });
   await app.register(demandsRoutes, { prefix: "/api/demands" });
   await app.register(prospectsRoutes, { prefix: "/api/prospects" });
-  await app.register(submissionsRoutes, { prefix: "/api/submissions" });
-  await app.register(coachingRoutes, { prefix: "/api/coaching" });
-  await app.register(clientPortalRoutes, { prefix: "/api/client-portal" });
-  await app.register(assessmentsRoutes, { prefix: "/api/assessments" });
-  await app.register(publicAssessmentRoutes, { prefix: "/api/public/assessments" });
-  await app.register(asyncVideoRoutes, { prefix: "/api/async-video" });
-  await app.register(publicAsyncVideoRoutes, { prefix: "/api/public/async-video" });
-  await app.register(proctorRoutes, { prefix: "/api/proctor" });
-  await app.register(recruitersRoutes, { prefix: "/api/recruiters" });
-  await app.register(teamMonitorRoutes, { prefix: "/api/team-monitor" });
-  await app.register(analyticsRoutes, { prefix: "/api/analytics" });
-  await app.register(rubricsRoutes, { prefix: "/api/rubrics" });
-  await app.register(sourcingRoutes, { prefix: "/api/sourcing" });
-  await app.register(messagingRoutes, { prefix: "/api/messaging" });
-  await app.register(voiceAgentCampaignRoutes, { prefix: "/api/voice-agent-campaigns" });
-  await app.register(liveAssistRoutes, { prefix: "/api/live-assist" });
-  await app.register(qaRoutes, { prefix: "/api/qa" });
   await app.register(usersRoutes, { prefix: "/api/users" });
   await app.register(teamsRoutes, { prefix: "/api/teams" });
   await app.register(rolesRoutes, { prefix: "/api/roles" });
   await app.register(orgRoutes, { prefix: "/api/org" });
-  await app.register(translationRoutes, { prefix: "/api/translation" });
-  await app.register(voiceAgentsRoutes, { prefix: "/api/voice-agents" });
-  await app.register(triageRoutes, { prefix: "/api/triage" });
-  await app.register(vapiWebhookRoutes, { prefix: "/api/vapi/webhooks" });
   await app.register(platformRoutes, { prefix: "/api/platform" });
   await app.register(questionBanksRoutes, { prefix: "/api/question-banks" });
-  await app.register(adminOfferLetterSyncRoutes, { prefix: "/api/admin/offer-letter-sync" });
 
   await registerIngestWs(app);
   await registerIngestCallWs(app);

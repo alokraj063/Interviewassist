@@ -22,6 +22,12 @@ interface QuestionListResponse {
   questions: BankQuestion[];
 }
 
+const DIFFICULTY_PILL: Record<string, string> = {
+  easy: "bg-emerald-50 text-emerald-700",
+  medium: "bg-amber-50 text-amber-700",
+  hard: "bg-rose-50 text-rose-700",
+};
+
 const LEVEL_PILL: Record<string, string> = {
   junior: "bg-emerald-50 text-emerald-700",
   mid: "bg-sky-50 text-sky-700",
@@ -73,7 +79,9 @@ export function QuestionBankPanel({
         <div className="divide-y divide-border">
           {planQuestions.map((q, i) => (
             <div key={i} className="p-3 hover:bg-muted/30">
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">{q.category}</div>
+              <span className={cn("pill text-[10px] mb-1 inline-block", DIFFICULTY_PILL[q.category.toLowerCase()] ?? "bg-muted text-muted-foreground")}>
+                {q.category}
+              </span>
               <div className="text-sm">{q.prompt}</div>
               <button
                 className="mt-2 text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 rounded-md px-2 py-1 inline-flex items-center gap-1"
