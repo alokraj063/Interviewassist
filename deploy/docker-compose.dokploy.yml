@@ -1,0 +1,208 @@
+# Dokploy compose for the J2W shared AWS EC2 host running Traefik + Dokploy.
+#
+# Host: AWS EC2 m5.large, ap-south-1, Elastic IP 13.127.19.121. App #1 on the
+# box is `cognition` (cognition.j2wofferletter.com). Taken names on the host:
+# project name `app`, slug `cognition` — ours (recruitassist-prod / recruitassist)
+# don't collide. Full host runbook: docs/dokploy-on-this-server.md.
+#
+# This stack is self-contained (postgres + redis + api + worker + web) and only
+# shares the host's Traefik via the external `dokploy-network`:
+#   - No Caddy service (Traefik handles TLS + routing on the host)
+#   - No host port bindings (Traefik attaches via the dokploy-network)
+#   - Postgres shared_buffers reduced to 256MB (RAM is shared with other apps)
+#   - All env values come from Dokploy's Environment tab (no env_file:)
+#   - Build context is the cloned repo root (Dokploy execs from there)
+#
+# Required env vars (set in Dokploy UI → Environment):
+#   COMPOSE_PROJECT_NAME=recruitassist-prod   (must be unique on the host)
+#   APP_SLUG=recruitassist                    (used in Traefik label keys)
+#   APP_HOST=recruitassist.joulestowatts.online
+#   POSTGRES_PASSWORD=<random-32+>
+#   JWT_SECRET=<random-64-hex>
+#   INTEGRATIONS_KEK=<32-byte-base64>         (back this up off-host)
+# Optional: OPENAI_API_KEY, DEEPGRAM_API_KEY, SARVAM_API_SUBSCRIPTION_KEY,
+# SHUNYA_API_KEY, VAPI_API_KEY, VAPI_PUBLIC_KEY, VAPI_WEBHOOK_SECRET,
+# RESEND_API_KEY, OFFER_LETTER_MYSQL_*, BOOTSTRAP_ADMIN_*.
+#
+# See deploy/.env.dokploy.template for the full set of keys to paste into
+# Dokploy's Environment tab.
+
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
+
+networks:
+  dokploy-network:
+    external: true
+  default: {}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recruitassist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-recruitassist}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./pg-init.sql:/docker-entrypoint-initdb.d/10-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recruitassist} -d ${POSTGRES_DB:-recruitassist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=128MB
+      -c work_mem=16MB
+      -c max_wal_size=1GB
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      # context is the repo root (compose file lives in deploy/, so .. = root).
+      # docker compose v2 resolves `context` relative to the compose file's
+      # directory; the dockerfile path is then relative to the build context.
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: ${APP_SLUG:?APP_SLUG is required}-node:latest
+    restart: unless-stopped
+    networks: [default, dokploy-network]
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: "8787"
+      DUMP_DIR: /var/audio-dumps
+      DATABASE_URL: postgres://${POSTGRES_USER:-recruitassist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-recruitassist}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      API_PUBLIC_URL: https://${APP_HOST:?APP_HOST is required}
+      APP_BASE_URL: https://${APP_HOST}
+      CUSTOM_TRANSCRIBER_PUBLIC_URL: wss://${APP_HOST}
+      CUSTOM_TRANSCRIBER_SECRET: ${CUSTOM_TRANSCRIBER_SECRET:-}
+      INTEGRATIONS_KEK: ${INTEGRATIONS_KEK:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      SARVAM_API_SUBSCRIPTION_KEY: ${SARVAM_API_SUBSCRIPTION_KEY:-}
+      SHUNYA_API_KEY: ${SHUNYA_API_KEY:-}
+      VAPI_API_KEY: ${VAPI_API_KEY:-}
+      VAPI_PUBLIC_KEY: ${VAPI_PUBLIC_KEY:-}
+      VAPI_WEBHOOK_SECRET: ${VAPI_WEBHOOK_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM: ${RESEND_FROM:-RecruitAssist <no-reply@recruitassist.joulestowatts.online>}
+      OFFER_LETTER_MYSQL_HOST: ${OFFER_LETTER_MYSQL_HOST:-}
+      OFFER_LETTER_MYSQL_PORT: ${OFFER_LETTER_MYSQL_PORT:-3306}
+      OFFER_LETTER_MYSQL_USER: ${OFFER_LETTER_MYSQL_USER:-}
+      OFFER_LETTER_MYSQL_PASSWORD: ${OFFER_LETTER_MYSQL_PASSWORD:-}
+      OFFER_LETTER_MYSQL_DATABASE: ${OFFER_LETTER_MYSQL_DATABASE:-offerletter}
+      OFFER_LETTER_MYSQL_TLS: ${OFFER_LETTER_MYSQL_TLS:-true}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      RECORDING_RETENTION_DAYS: ${RECORDING_RETENTION_DAYS:-90}
+    volumes:
+      - blobs:/app/var/blobs
+      - audio_dumps:/var/audio-dumps
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    # apps/api package.json `start` is `node --loader tsx dist/index.js`,
+    # which errors on Node 20.6+ ('--loader' deprecated). Run tsx on source
+    # directly — same approach as the worker, also skips the tsc build step.
+    command: ["pnpm", "--filter", "@j2w/api", "exec", "tsx", "src/index.ts"]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # HTTP API (priority 20 beats web's Host-only rule at default priority 1)
+      - traefik.http.routers.${APP_SLUG}-api.rule=Host(`${APP_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.${APP_SLUG}-api.entrypoints=websecure
+      - traefik.http.routers.${APP_SLUG}-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.${APP_SLUG}-api.priority=20
+      - traefik.http.routers.${APP_SLUG}-api.service=${APP_SLUG}-api
+      # SSE: disable Traefik response buffering so KB-ingest heartbeats stream
+      # (belt-and-braces — the API also emits X-Accel-Buffering: no on /api/kb/sources/:id/events)
+      - traefik.http.routers.${APP_SLUG}-api.middlewares=${APP_SLUG}-sse@docker
+      - traefik.http.middlewares.${APP_SLUG}-sse.buffering.maxResponseBodyBytes=0
+      - traefik.http.middlewares.${APP_SLUG}-sse.buffering.memResponseBodyBytes=0
+      # WebSockets (priority 30, points at the same api service)
+      - traefik.http.routers.${APP_SLUG}-ws.rule=Host(`${APP_HOST}`) && PathPrefix(`/ws`)
+      - traefik.http.routers.${APP_SLUG}-ws.entrypoints=websecure
+      - traefik.http.routers.${APP_SLUG}-ws.tls.certresolver=letsencrypt
+      - traefik.http.routers.${APP_SLUG}-ws.priority=30
+      - traefik.http.routers.${APP_SLUG}-ws.service=${APP_SLUG}-api
+      # Service definition
+      - traefik.http.services.${APP_SLUG}-api.loadbalancer.server.port=8787
+
+  worker:
+    image: ${APP_SLUG}-node:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DUMP_DIR: /var/audio-dumps
+      DATABASE_URL: postgres://${POSTGRES_USER:-recruitassist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-recruitassist}
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      OFFER_LETTER_MYSQL_HOST: ${OFFER_LETTER_MYSQL_HOST:-}
+      OFFER_LETTER_MYSQL_PORT: ${OFFER_LETTER_MYSQL_PORT:-3306}
+      OFFER_LETTER_MYSQL_USER: ${OFFER_LETTER_MYSQL_USER:-}
+      OFFER_LETTER_MYSQL_PASSWORD: ${OFFER_LETTER_MYSQL_PASSWORD:-}
+      OFFER_LETTER_MYSQL_DATABASE: ${OFFER_LETTER_MYSQL_DATABASE:-offerletter}
+      OFFER_LETTER_MYSQL_TLS: ${OFFER_LETTER_MYSQL_TLS:-true}
+      RECORDING_RETENTION_DAYS: ${RECORDING_RETENTION_DAYS:-90}
+    volumes:
+      - blobs:/app/var/blobs
+      - audio_dumps:/var/audio-dumps
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["pnpm", "--filter", "@j2w/worker", "start"]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_API_BASE_URL: https://${APP_HOST}
+        VITE_WS_BASE_URL: wss://${APP_HOST}
+    restart: unless-stopped
+    networks: [default, dokploy-network]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.${APP_SLUG}-web.rule=Host(`${APP_HOST}`)
+      - traefik.http.routers.${APP_SLUG}-web.entrypoints=websecure
+      - traefik.http.routers.${APP_SLUG}-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.${APP_SLUG}-web.priority=1
+      - traefik.http.services.${APP_SLUG}-web.loadbalancer.server.port=80
+
+volumes:
+  pgdata:
+  redisdata:
+  blobs:
+  audio_dumps:

@@ -1,0 +1,20 @@
+**/node_modules
+**/dist
+**/.turbo
+**/.vite
+**/.next
+var
+.git
+.github
+.vscode
+.idea
+.DS_Store
+.env
+.env.local
+.env.*.local
+*.log
+pnpm-debug.log*
+# Don't exclude apps/desktop entirely — its package.json is needed for pnpm
+# workspace resolution during install. Its source isn't needed at runtime, but
+# it's <1MB so we allow it through for simplicity.
+deploy

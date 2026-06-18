@@ -1,0 +1,39 @@
+{
+  "name": "recruitassist",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@9.9.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @j2w/web --filter @j2w/api --filter @j2w/worker dev",
+    "dev:web": "pnpm --filter @j2w/web dev",
+    "dev:api": "pnpm --filter @j2w/api dev",
+    "dev:worker": "pnpm --filter @j2w/worker dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "lint:web": "pnpm --filter @j2w/web lint",
+    "test": "pnpm --filter @j2w/web test",
+    "test:api": "pnpm --filter @j2w/api test",
+    "e2e:smoke": "playwright test --config=tests/e2e/playwright.config.ts",
+    "db:migrate": "pnpm --filter @j2w/api db:migrate",
+    "db:generate": "pnpm --filter @j2w/api db:generate",
+    "db:push": "pnpm --filter @j2w/api db:push",
+    "db:seed": "pnpm --filter @j2w/api db:seed",
+    "db:seed-demo": "pnpm --filter @j2w/api db:seed-demo",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:logs": "docker compose logs -f"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@playwright/test": "^1.49.1",
+    "eslint": "^9.32.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^15.15.0",
+    "typescript-eslint": "^8.38.0"
+  },
+  "engines": {
+    "node": ">=18.20"
+  }
+}

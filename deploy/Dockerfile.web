@@ -1,0 +1,29 @@
+# Build the Vite SPA (RecruitAssist) with public URLs baked in, then serve via nginx.
+FROM node:20-bookworm-slim AS build
+RUN corepack enable && corepack prepare pnpm@9.9.0 --activate
+WORKDIR /app
+
+# Public URLs used by the SPA at runtime (same-origin against Caddy).
+ARG VITE_API_BASE_URL
+ARG VITE_WS_BASE_URL
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_WS_BASE_URL=${VITE_WS_BASE_URL}
+
+COPY pnpm-workspace.yaml pnpm-lock.yaml .npmrc package.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/ingest-shared/package.json packages/ingest-shared/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
+RUN pnpm install --frozen-lockfile
+
+COPY packages packages
+COPY apps/web apps/web
+RUN pnpm --filter @j2w/web build
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+COPY deploy/nginx-spa.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

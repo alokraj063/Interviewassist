@@ -1,0 +1,94 @@
+{
+  "scenario": "carlos-garcia-hp-pavilion",
+  "notes": "Canned translations for the Phase 1 Spanish-caller demo. The mock provider matches on exact source text; anything off-script falls back to a [targetLang] echo. Phase 2 adds this to apps/api/fixtures/translation and the mock provider picks it up automatically.",
+  "entries": [
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Hola, mi portátil HP no se enciende. La luz de encendido se ilumina pero la pantalla se queda en negro.",
+      "targetText": "Hi, my HP laptop won't turn on. The power light comes on but the screen stays black.",
+      "confidence": 0.94,
+      "latencyMs": 320
+    },
+    {
+      "sourceLang": "en-US",
+      "targetLang": "es-ES",
+      "sourceText": "I'm really sorry to hear that, Carlos. I'll help you get this sorted. When was the last time it worked normally?",
+      "targetText": "Lo siento mucho, Carlos. Voy a ayudarte a resolverlo. ¿Cuándo fue la última vez que funcionó con normalidad?",
+      "confidence": 0.93,
+      "latencyMs": 280
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Anoche funcionaba perfectamente. Por la mañana me salió un aviso de actualización de la BIOS, y después ya no arranca.",
+      "targetText": "It was working perfectly last night. This morning I got a BIOS update prompt, and after installing it the laptop won't boot.",
+      "confidence": 0.91,
+      "latencyMs": 410
+    },
+    {
+      "sourceLang": "en-US",
+      "targetLang": "es-ES",
+      "sourceText": "Got it. A hard reset after a BIOS update usually works. Your data will be safe — don't worry.",
+      "targetText": "Entendido. Después de una actualización de BIOS, un reinicio forzado suele funcionar. Tus datos están a salvo, no te preocupes.",
+      "confidence": 0.95,
+      "latencyMs": 260
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Vale, pero la batería no es extraíble. ¿Qué tengo que hacer exactamente? Lo necesito para trabajar.",
+      "targetText": "Okay, but the battery isn't removable. What exactly do I need to do? I need it for work.",
+      "confidence": 0.52,
+      "latencyMs": 540
+    },
+    {
+      "sourceLang": "en-US",
+      "targetLang": "es-ES",
+      "sourceText": "Unplug the power adapter, then hold the power button down for 30 seconds. That drains the residual charge. Plug it back in and try to boot.",
+      "targetText": "Desconecta el cargador y mantén pulsado el botón de encendido durante 30 segundos. Eso descarga la carga residual. Vuelve a conectarlo e intenta arrancar.",
+      "confidence": 0.96,
+      "latencyMs": 240
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Vale, lo intento. Espera un momento, por favor.",
+      "targetText": "Okay, I'll try it. Hold on a moment, please.",
+      "confidence": 0.97,
+      "latencyMs": 210
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "¡Sí! Ya ha arrancado, puedo ver la pantalla. Muchísimas gracias. ¿Y si me vuelve a pasar en el futuro? Tengo garantía, ¿no?",
+      "targetText": "Yes! It booted, I can see the screen. Thank you so much. What if it happens again? I'm still under warranty, right?",
+      "confidence": 0.93,
+      "latencyMs": 300
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Perfecto, todo funciona de nuevo. ¿Podemos actualizar mi cuenta con este incidente?",
+      "targetText": "Great, everything works again. Can we update my account with this incident?",
+      "confidence": 0.94,
+      "latencyMs": 300
+    },
+    {
+      "sourceLang": "en-US",
+      "targetLang": "es-ES",
+      "sourceText": "Of course, I'll log the incident and link it to your warranty case so it's on record.",
+      "targetText": "Por supuesto, registraré el incidente y lo vincularé a tu caso de garantía para que quede constancia.",
+      "confidence": 0.96,
+      "latencyMs": 260
+    },
+    {
+      "sourceLang": "es-ES",
+      "targetLang": "en-US",
+      "sourceText": "Muchas gracias por tu ayuda. Un servicio excelente, de verdad.",
+      "targetText": "Thank you very much for your help. Truly excellent service.",
+      "confidence": 0.95,
+      "latencyMs": 300
+    }
+  ]
+}

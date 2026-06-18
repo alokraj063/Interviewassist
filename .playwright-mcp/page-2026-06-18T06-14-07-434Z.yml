@@ -1,0 +1,50 @@
+- generic [ref=e2]:
+  - region "Notifications (F8)":
+    - list
+  - region "Notifications alt+T"
+  - main [ref=e4]:
+    - generic [ref=e5]:
+      - img "Joules to Watts" [ref=e8]
+      - generic [ref=e9]:
+        - heading "Sign in to RecruitAssist" [level=1] [ref=e10]
+        - paragraph [ref=e11]: Use your work email to access your workspace.
+        - generic [ref=e12]:
+          - button "Continue with Google" [ref=e13] [cursor=pointer]:
+            - img [ref=e14]
+            - generic [ref=e19]: Continue with Google
+          - button "Continue with Microsoft" [ref=e20] [cursor=pointer]:
+            - img [ref=e21]
+            - generic [ref=e26]: Continue with Microsoft
+          - button "Continue with SAML SSO" [ref=e27] [cursor=pointer]:
+            - img [ref=e28]
+            - generic [ref=e30]: Continue with SAML SSO
+        - generic [ref=e33]: or
+        - generic [ref=e35]:
+          - generic [ref=e36]:
+            - generic [ref=e37]: Work email
+            - textbox "Work email" [ref=e38]
+          - generic [ref=e39]:
+            - generic [ref=e40]:
+              - generic [ref=e41]: Password
+              - link "Forgot password?" [ref=e42] [cursor=pointer]:
+                - /url: /forgot-password
+            - textbox "Password" [ref=e43]
+          - generic [ref=e44]:
+            - checkbox "Remember me on this device" [checked] [ref=e45] [cursor=pointer]:
+              - generic:
+                - img
+            - checkbox [checked]
+            - generic [ref=e46]: Remember me on this device
+          - button "Sign in" [ref=e47] [cursor=pointer]
+        - paragraph [ref=e48]:
+          - text: New to RecruitAssist?
+          - link "Create a workspace" [ref=e49] [cursor=pointer]:
+            - /url: /sign-up
+      - generic [ref=e50]:
+        - link "Terms" [ref=e51] [cursor=pointer]:
+          - /url: /sign-in
+        - link "Privacy" [ref=e52] [cursor=pointer]:
+          - /url: /sign-in
+        - link "Security" [ref=e53] [cursor=pointer]:
+          - /url: /sign-in
+        - generic [ref=e54]: © 2026 RecruitAssist
