@@ -45,22 +45,22 @@ export function QuestionBankPanel({
   /** Click "Ask this" → overtake the interview flow's current question. */
   onAsk?: (question: string, category: string) => void;
 } = {}) {
-  // Banks linked to the selected demand (the JD).
+  // Banks linked to the selected demand (the JD). Strictly JD-based: when a
+  // demand is selected we ONLY show its linked bank(s). With no demand (pre-call
+  // browsing) we show all org banks.
   const { data: demandBanks, isLoading: demandLoading } = useQuery<{ banks: BankSummary[] }>({
     queryKey: ["question-banks", "demand", demandId],
     queryFn: () => apiFetch(`/api/question-banks?demandId=${demandId}`),
     enabled: !!demandId,
   });
-  // Fallback: all org banks (used when no bank is linked to the demand).
   const { data: allBanks, isLoading: allLoading } = useQuery<{ banks: BankSummary[] }>({
     queryKey: ["question-banks", "all"],
     queryFn: () => apiFetch("/api/question-banks"),
+    enabled: !demandId,
   });
 
-  const linked = demandBanks?.banks ?? [];
-  const banks = linked.length > 0 ? linked : allBanks?.banks ?? [];
-  const usingDemandBank = linked.length > 0;
-  const banksLoading = (!!demandId && demandLoading) || allLoading;
+  const banks = demandId ? demandBanks?.banks ?? [] : allBanks?.banks ?? [];
+  const banksLoading = demandId ? demandLoading : allLoading;
   const firstBank = banks[0];
   const firstBankId = firstBank?.id;
 
@@ -86,7 +86,9 @@ export function QuestionBankPanel({
     return (
       <div className="p-6 text-center text-xs text-muted-foreground">
         <Library className="w-5 h-5 mx-auto opacity-40 mb-1" />
-        No question banks linked to this demand yet.
+        {demandId
+          ? "No question bank linked to this JD. Link one in Settings → Jobs."
+          : "No question banks yet. Add one in Settings → Jobs."}
       </div>
     );
   }
@@ -94,10 +96,7 @@ export function QuestionBankPanel({
   return (
     <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
       <div className="px-4 py-2 border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground font-semibold flex items-center justify-between">
-        <span className="truncate">
-          {firstBank.name}
-          {!usingDemandBank && demandId && <span className="ml-1 normal-case font-normal opacity-60">(not linked to JD)</span>}
-        </span>
+        <span className="truncate">{firstBank.name}</span>
         <span className="tabular-nums shrink-0">{questions.length} q</span>
       </div>
       <div className="divide-y divide-border">
