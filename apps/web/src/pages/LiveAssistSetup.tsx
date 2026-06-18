@@ -333,6 +333,8 @@ export default function LiveAssistSetup() {
               liveRubric={sourceLiveRubric}
               demandId={demandId ?? undefined}
               onAsk={(question, category) => flow.askCustom(question, category)}
+              generatedPlan={flow.plan}
+              generating={flow.running && flow.plan.length === 0}
             />
           </div>
           <div className="col-span-12 xl:col-span-7 row-span-7 min-h-0">

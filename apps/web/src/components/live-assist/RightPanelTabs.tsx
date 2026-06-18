@@ -12,11 +12,15 @@ export function RightPanelTabs({
   liveRubric,
   demandId,
   onAsk,
+  generatedPlan,
+  generating,
 }: {
   callId?: string;
   liveRubric?: LiveRubricSnapshot | null;
   demandId?: string;
   onAsk?: (question: string, category: string) => void;
+  generatedPlan?: Array<{ name: string; questions: string[] }>;
+  generating?: boolean;
 }) {
   const [tab, setTab] = useState<RightTab>("question-bank");
   const tabs: { id: RightTab; label: string }[] = [
@@ -44,7 +48,9 @@ export function RightPanelTabs({
         ))}
       </div>
       <div className="flex-1 min-h-0 overflow-hidden">
-        {tab === "question-bank" && <QuestionBankPanel demandId={demandId} onAsk={onAsk} />}
+        {tab === "question-bank" && (
+          <QuestionBankPanel demandId={demandId} onAsk={onAsk} generatedPlan={generatedPlan} generating={generating} />
+        )}
         {tab === "rubric" && <RubricLivePanel liveRubric={liveRubric} />}
         {tab === "compliance" && <CompliancePanel />}
         {tab === "notes" && <NotesPanel callId={callId} />}

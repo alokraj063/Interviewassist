@@ -39,12 +39,67 @@ const LEVEL_PILL: Record<string, string> = {
 export function QuestionBankPanel({
   demandId,
   onAsk,
+  generatedPlan,
+  generating,
 }: {
   /** When set, prefer banks linked to this demand (the selected JD). */
   demandId?: string;
   /** Click "Ask this" → overtake the interview flow's current question. */
   onAsk?: (question: string, category: string) => void;
+  /** The question plan AI-generated for THIS call from the JD (preferred). */
+  generatedPlan?: Array<{ name: string; questions: string[] }>;
+  /** True while the plan is still being generated. */
+  generating?: boolean;
 } = {}) {
+  // Preferred source: the plan generated for this call from the JD. Shown as
+  // soon as the call is set up — no manual bank linking required.
+  const planQuestions = (generatedPlan ?? []).flatMap((c) =>
+    (c.questions ?? []).map((q) => ({ category: c.name, prompt: q })),
+  );
+  if (generating && planQuestions.length === 0) {
+    return (
+      <div className="p-4 text-xs text-muted-foreground flex items-center gap-2">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Generating the question bank for this JD…
+      </div>
+    );
+  }
+  if (planQuestions.length > 0) {
+    return (
+      <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
+        <div className="px-4 py-2 border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground font-semibold flex items-center justify-between">
+          <span className="truncate">Generated for this JD</span>
+          <span className="tabular-nums shrink-0">{planQuestions.length} q</span>
+        </div>
+        <div className="divide-y divide-border">
+          {planQuestions.map((q, i) => (
+            <div key={i} className="p-3 hover:bg-muted/30">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">{q.category}</div>
+              <div className="text-sm">{q.prompt}</div>
+              <button
+                className="mt-2 text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 rounded-md px-2 py-1 inline-flex items-center gap-1"
+                onClick={() => {
+                  onAsk?.(q.prompt, q.category);
+                  toast.success("Now asking this question", { description: q.prompt.slice(0, 60) });
+                }}
+              >
+                <Mic className="w-3 h-3" />Ask this
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return <DbBankPanel demandId={demandId} onAsk={onAsk} />;
+}
+
+function DbBankPanel({
+  demandId,
+  onAsk,
+}: {
+  demandId?: string;
+  onAsk?: (question: string, category: string) => void;
+}) {
   // Banks linked to the selected demand (the JD). Strictly JD-based: when a
   // demand is selected we ONLY show its linked bank(s). With no demand (pre-call
   // browsing) we show all org banks.
