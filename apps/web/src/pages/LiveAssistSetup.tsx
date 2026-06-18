@@ -193,7 +193,9 @@ export default function LiveAssistSetup() {
   useEffect(() => {
     if (demoActive) return; // the demo runner drives its own panels
     const id = wedge.state.callId;
-    if (effectiveStatus === "live" && id && flowStartedFor.current !== id) {
+    // Generate the plan/question-bank as soon as the call exists ("ready"),
+    // i.e. before the conversation actually starts — so questions are ready.
+    if ((effectiveStatus === "ready" || effectiveStatus === "live") && id && flowStartedFor.current !== id) {
       flowStartedFor.current = id;
       void flow.startFlow(id);
     }
