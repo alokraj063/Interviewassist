@@ -12,10 +12,13 @@ Docs: https://developers.deepgram.com/docs/flux/quickstart
 """
 
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlencode
@@ -25,7 +28,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
-from starlette.responses import RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 import db
 
@@ -66,6 +69,82 @@ async def redirect_zero_host(request, call_next):
     # frontend edits always take effect on a normal refresh.
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Auth — single shared credential from .env, stateless HMAC-signed tokens so
+# sessions survive server restarts without a session store.
+# ---------------------------------------------------------------------------
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")
+AUTH_SECRET = os.getenv("AUTH_SECRET", "")
+AUTH_TTL_SECONDS = int(os.getenv("AUTH_TTL_SECONDS", str(7 * 24 * 3600)))
+
+# Paths that stay public: login itself, health probes, static frontend files.
+_AUTH_PREFIXES = ("/api", "/assist", "/transcript")
+_PUBLIC_PATHS = {"/api/auth/login"}
+
+
+def _sign(payload: str) -> str:
+    return hmac.new(AUTH_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def make_token(username: str) -> str:
+    expires = int(time.time()) + AUTH_TTL_SECONDS
+    payload = f"{username}:{expires}"
+    return f"{payload}:{_sign(payload)}"
+
+
+def verify_token(token: str) -> str | None:
+    """Return the username if the token is valid and unexpired, else None."""
+    if not token or not AUTH_SECRET:
+        return None
+    try:
+        username, expires, sig = token.rsplit(":", 2)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(sig, _sign(f"{username}:{expires}")):
+        return None
+    try:
+        if int(expires) < time.time():
+            return None
+    except ValueError:
+        return None
+    return username
+
+
+def _bearer_token(request) -> str:
+    auth = request.headers.get("authorization", "")
+    return auth[7:] if auth.lower().startswith("bearer ") else ""
+
+
+@app.middleware("http")
+async def require_auth(request, call_next):
+    path = request.url.path
+    if path.startswith(_AUTH_PREFIXES) and path not in _PUBLIC_PATHS:
+        if not verify_token(_bearer_token(request)):
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: Request):
+    data = await req.json()
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    ok_user = hmac.compare_digest(username, AUTH_USERNAME)
+    ok_pass = bool(AUTH_PASSWORD) and hmac.compare_digest(password, AUTH_PASSWORD)
+    if not (ok_user and ok_pass):
+        await asyncio.sleep(0.4)  # blunt brute-force throttle
+        return JSONResponse({"ok": False, "error": "Invalid username or password"}, status_code=401)
+    return {"ok": True, "token": make_token(username), "username": username,
+            "expiresIn": AUTH_TTL_SECONDS}
+
+
+@app.get("/api/auth/me")
+async def auth_me(req: Request):
+    # The middleware already rejected invalid tokens; this just echoes the user.
+    return {"ok": True, "username": verify_token(_bearer_token(req))}
 
 
 def deepgram_url(diarize: bool = False) -> str:
@@ -769,6 +848,12 @@ def _diarized_runs(alt: dict) -> list[tuple[str, str]]:
 @app.websocket("/stream")
 async def stream(client: WebSocket):
     await client.accept()
+    if not verify_token(client.query_params.get("token", "")):
+        await client.send_json({"type": "status", "state": "error",
+                                "role": client.query_params.get("role", "unknown"),
+                                "message": "unauthorized — please sign in again"})
+        await client.close(code=4401)
+        return
     role = client.query_params.get("role", "unknown")
     phone_mode = role == "phone"
     speaker = {"interviewer": "Interviewer", "candidate": "Candidate"}.get(role, role)

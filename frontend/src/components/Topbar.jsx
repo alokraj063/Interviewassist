@@ -2,6 +2,7 @@ export default function Topbar({
   view, onView,
   micState, callState, callMode,
   theme, onToggleTheme,
+  username, onLogout,
 }) {
   const phone = callMode === 'phone';
   const isDark = theme === 'dark';
@@ -38,6 +39,15 @@ export default function Topbar({
         >
           {isDark ? '☀' : '☾'}
         </button>
+        {username && (
+          <div className="userChip">
+            <span className="userChip__avatar">{username.slice(0, 1).toUpperCase()}</span>
+            <span className="userChip__name">{username}</span>
+            <button type="button" className="userChip__out" onClick={onLogout} title="Sign out">
+              Sign out
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

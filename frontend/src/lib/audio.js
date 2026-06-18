@@ -5,7 +5,10 @@
 //   - "candidate":   the call's audio (getDisplayMedia, "share tab audio")
 //   - "phone":       mixed mic, diarized server-side into Speaker 1 / Speaker 2
 
-const WS_BASE = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream`;
+import { getToken } from './auth';
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
+const WS_BASE = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${BASE}/stream`;
 
 export class Source {
   constructor(role, stream, onTranscript) {
@@ -23,7 +26,7 @@ export class Source {
   }
 
   async start() {
-    this.ws = new WebSocket(`${WS_BASE}?role=${this.role}`);
+    this.ws = new WebSocket(`${WS_BASE}?role=${this.role}&token=${encodeURIComponent(getToken() || '')}`);
     this.ws.binaryType = 'arraybuffer';
     this.ws.onopen  = () => this.onDot && this.onDot('live');
     this.ws.onclose = () => this.onDot && this.onDot('off');
@@ -31,7 +34,7 @@ export class Source {
     this.ws.onmessage = (ev) => this.onMessage(ev);
 
     this.ctx = new AudioContext();
-    await this.ctx.audioWorklet.addModule('/pcm-worklet.js');
+    await this.ctx.audioWorklet.addModule(`${BASE}/pcm-worklet.js`);
     const src = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, 'pcm-processor');
     this.node.port.onmessage = (e) => {

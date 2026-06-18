@@ -4,8 +4,11 @@ import Banner from './components/Banner.jsx';
 import Transcript from './components/Transcript.jsx';
 import AssistPanel from './components/AssistPanel.jsx';
 import Library from './components/Library.jsx';
+import Login from './components/Login.jsx';
 import { useAudioCapture } from './hooks/useAudioCapture.js';
 import { useInterviewFlow } from './hooks/useInterviewFlow.js';
+import { api } from './lib/api';
+import { getAuth, setAuth, clearAuth } from './lib/auth';
 
 // Theme preference. Light by default; persisted per-browser via localStorage so a
 // user's choice survives reloads but never leaks across users (each browser/profile
@@ -21,6 +24,7 @@ const readTheme = () => {
 export default function App() {
   const [view, setView] = useState('live');           // 'live' | 'library'
   const [theme, setTheme] = useState(readTheme);
+  const [auth, setAuthState] = useState(getAuth);
   const [clientId, setClientId] = useState('');
   const [jdId, setJdId] = useState('');
   const [resumeFile, setResumeFile] = useState(null);
@@ -35,6 +39,15 @@ export default function App() {
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   }, []);
+
+  // Re-validate a persisted token once on mount; a stale one drops to the login gate.
+  useEffect(() => {
+    if (!getAuth()) return;
+    api.me().catch(() => { clearAuth(); setAuthState(null); });
+  }, []);
+
+  const handleLogin = useCallback((a) => { setAuth(a); setAuthState(a); }, []);
+  const handleLogout = useCallback(() => { clearAuth(); setAuthState(null); }, []);
 
   // Audio + transcript
   const audio = useAudioCapture({ clientId, jdId });
@@ -95,12 +108,17 @@ export default function App() {
 
   const running = flow.running || audio.micState === 'live' || audio.callState === 'live';
 
+  if (!auth) {
+    return <Login onLogin={handleLogin} theme={theme} onToggleTheme={toggleTheme} />;
+  }
+
   return (
     <div className="app">
       <Topbar
         view={view} onView={setView}
         micState={audio.micState} callState={audio.callState} callMode={callMode}
         theme={theme} onToggleTheme={toggleTheme}
+        username={auth.username} onLogout={handleLogout}
       />
       <Banner banner={audio.banner} />
 

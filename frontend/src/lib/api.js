@@ -1,14 +1,36 @@
-// Thin fetch wrappers for the FastAPI backend. All calls are relative — Vite proxies
-// /api, /assist, /transcript to localhost:3001 in dev; FastAPI serves them directly
-// when the React build is mounted in production.
+// Thin fetch wrappers for the FastAPI backend. All calls are relative to Vite's base —
+// '/' in dev (Vite proxies /api, /assist, /transcript to localhost:5000) and
+// '/ai-interview-agent/' in production, where Caddy strips the prefix before FastAPI.
+
+import { getToken, clearAuth } from './auth';
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+function authHeaders(extra = {}) {
+  const token = getToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
 
 async function json(url, opts = {}) {
-  const res = await fetch(url, opts);
+  const res = await fetch(BASE + url, { ...opts, headers: authHeaders(opts.headers || {}) });
+  if (res.status === 401 && !url.startsWith('/api/auth/')) {
+    // Token expired or revoked — drop the session and bounce to the login gate.
+    clearAuth();
+    window.location.reload();
+    throw new Error('unauthorized');
+  }
   if (!res.ok) throw new Error(`${url} -> ${res.status}`);
   return res.json();
 }
 
 export const api = {
+  // Auth
+  login: (username, password) => json('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  }),
+  me: () => json('/api/auth/me'),
+
   // Clients & JDs
   listClients:  ()             => json('/api/clients'),
   createClient: (name)         => json('/api/clients', {
@@ -28,8 +50,8 @@ export const api = {
   getInterview:    (id)        => json(`/api/interviews/${id}`),
 
   // Transcript turn log
-  saveTurn: (payload) => fetch('/transcript', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  saveTurn: (payload) => fetch(BASE + '/transcript', {
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload),
   }).catch(() => {}),
 
