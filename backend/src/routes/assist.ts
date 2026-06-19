@@ -63,66 +63,70 @@ async function gptJson(
   }
 }
 
-/** Build the "JD" + "resume" strings the prompts need from our DB rows. */
+/** Build the "JD" + "resume" strings the prompts need from the call doc.
+ *  We read the inline snapshots written by POST /api/calls (demandSnapshot +
+ *  candidate) so the assist endpoints don't depend on any "demands" or
+ *  "candidates" persistence — both are gone now (jobs live in OL, candidate
+ *  is ephemeral). Scoping is by `recruiterUserId`. */
 async function loadJdResume(
   callId: string,
-  orgId: string,
+  recruiterUserId: string,
 ): Promise<{ jd: string; resume: string; candidateName: string } | null> {
-  const call = await collections.callSessions().findOne<{ orgId: string; demandId: string | null; candidateId: string | null }>({ id: callId });
-  if (!call || call.orgId !== orgId) return null;
+  const call = await collections.interviews().findOne<{
+    recruiterUserId: string;
+    demandSnapshot?: {
+      title?: string | null; designation?: string | null;
+      client?: string | null;
+      experienceFrom?: number | null; experienceTo?: number | null;
+      primaryLocation?: string | null;
+      description?: string | null; responsibilities?: string | null;
+    } | null;
+    candidate?: {
+      name?: string | null; currentTitle?: string | null; currentCompany?: string | null;
+      totalExperienceYears?: number | null; currentLocation?: string | null;
+      parsedResume?: Record<string, unknown> | null;
+    } | null;
+  }>({ id: callId });
+  if (!call || call.recruiterUserId !== recruiterUserId) return null;
 
   let jd = "";
-  if (call.demandId) {
-    const d = await collections.demands().findOne<{
-      title: string | null; designation: string | null; description: string | null;
-      responsibilities: string | null; experienceMinYears: string | null;
-      experienceMaxYears: string | null; primaryLocation: string | null; clientId: string | null;
-    }>({ id: call.demandId });
-    if (d) {
-      let client: string | null = null;
-      if (d.clientId) {
-        const c = await collections.clients().findOne<{ companyName: string }>({ id: d.clientId });
-        client = c?.companyName ?? null;
-      }
-      const exp = [d.experienceMinYears, d.experienceMaxYears].filter(Boolean).join("–");
-      jd = [
-        `ROLE: ${d.title ?? "(untitled)"}${d.designation ? ` (${d.designation})` : ""}`,
-        client ? `CLIENT: ${client}` : "",
-        exp ? `EXPERIENCE REQUIRED: ${exp} years` : "",
-        d.primaryLocation ? `LOCATION: ${d.primaryLocation}` : "",
-        d.description ? `\nJOB DESCRIPTION:\n${d.description}` : "",
-        d.responsibilities ? `\nRESPONSIBILITIES:\n${d.responsibilities}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .trim();
-    }
+  if (call.demandSnapshot) {
+    const d = call.demandSnapshot;
+    const exp = [d.experienceFrom, d.experienceTo].filter((v) => v != null).join("–");
+    jd = [
+      `ROLE: ${d.title ?? "(untitled)"}${d.designation ? ` (${d.designation})` : ""}`,
+      d.client ? `CLIENT: ${d.client}` : "",
+      exp ? `EXPERIENCE REQUIRED: ${exp} years` : "",
+      d.primaryLocation ? `LOCATION: ${d.primaryLocation}` : "",
+      d.description ? `\nJOB DESCRIPTION:\n${d.description}` : "",
+      d.responsibilities ? `\nRESPONSIBILITIES:\n${d.responsibilities}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
   }
 
+  // Candidate identity lives inline on the call doc (ephemeral upload).
+  // If the resume parser produced a `parsedResume` JSON, include its raw
+  // form so the prompts can lift skills/experience/CTC etc. without us
+  // having to schema-match every field.
   let resume = "";
   let candidateName = "";
-  if (call.candidateId) {
-    const k = await collections.candidates().findOne<{
-      displayName: string | null; currentTitle: string | null; currentCompany: string | null;
-      totalExperienceYears: string | null; currentLocation: string | null;
-      currentCtcLakhs: string | null; expectedCtcLakhs: string | null; noticePeriodDays: number | null;
-    }>({ id: call.candidateId });
-    if (k) {
-      candidateName = k.displayName ?? "";
-      resume = [
-        `NAME: ${k.displayName ?? "(unknown)"}`,
-        k.currentTitle ? `CURRENT TITLE: ${k.currentTitle}` : "",
-        k.currentCompany ? `CURRENT COMPANY: ${k.currentCompany}` : "",
-        k.totalExperienceYears ? `TOTAL EXPERIENCE: ${k.totalExperienceYears} years` : "",
-        k.currentLocation ? `LOCATION: ${k.currentLocation}` : "",
-        k.currentCtcLakhs ? `CURRENT CTC: ${k.currentCtcLakhs} LPA` : "",
-        k.expectedCtcLakhs ? `EXPECTED CTC: ${k.expectedCtcLakhs} LPA` : "",
-        k.noticePeriodDays != null ? `NOTICE PERIOD: ${k.noticePeriodDays} days` : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .trim();
+  const k = call.candidate;
+  if (k) {
+    candidateName = k.name ?? "";
+    const lines = [
+      `NAME: ${k.name ?? "(unknown)"}`,
+      k.currentTitle ? `CURRENT TITLE: ${k.currentTitle}` : "",
+      k.currentCompany ? `CURRENT COMPANY: ${k.currentCompany}` : "",
+      k.totalExperienceYears != null ? `TOTAL EXPERIENCE: ${k.totalExperienceYears} years` : "",
+      k.currentLocation ? `LOCATION: ${k.currentLocation}` : "",
+    ].filter(Boolean);
+    if (k.parsedResume && Object.keys(k.parsedResume).length > 0) {
+      lines.push("\nPARSED RESUME (raw):");
+      lines.push(JSON.stringify(k.parsedResume, null, 2));
     }
+    resume = lines.join("\n").trim();
   }
 
   return { jd, resume, candidateName };
@@ -256,11 +260,11 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
     const body = z.object({ callId: z.string().uuid() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
-    const ctx = await loadJdResume(body.data.callId, req.authUser!.orgId);
+    const ctx = await loadJdResume(body.data.callId, req.authUser!.uid);
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const user = `JOB DESCRIPTION:\n${ctx.jd || "(none provided)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none provided)"}`;
-    const result = await gptJson(PLAN_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "plan", callId: body.data.callId });
+    const result = await gptJson(PLAN_SYSTEM, user, { orgId: req.authUser!.uid, operation: "plan", callId: body.data.callId });
     return {
       ok: true,
       candidateName: ctx.candidateName,
@@ -287,7 +291,7 @@ export async function assistRoutes(app: FastifyInstance) {
       })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
-    const ctx = await loadJdResume(body.data.callId, req.authUser!.orgId);
+    const ctx = await loadJdResume(body.data.callId, req.authUser!.uid);
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const recent = body.data.transcript
@@ -295,7 +299,7 @@ export async function assistRoutes(app: FastifyInstance) {
       .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
       .join("\n");
     const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nQ&A SO FAR (coverage):\n${fmtHistory(body.data.history)}\n\nRECENT TRANSCRIPT (last turns, verbatim — use for immediate context; labels may be imperfect):\n${recent || "(nothing spoken yet)"}`;
-    const result = await gptJson(NEXT_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "next", callId: body.data.callId });
+    const result = await gptJson(NEXT_SYSTEM, user, { orgId: req.authUser!.uid, operation: "next", callId: body.data.callId });
     return {
       ok: true,
       category: ((result.category as string) ?? "").trim(),
@@ -317,7 +321,7 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
 
     const user = `CURRENT QUESTION:\n${body.data.question}\n\nCANDIDATE ANSWER SO FAR:\n${body.data.answer || "(nothing substantive yet)"}`;
-    const result = await gptJson(VERIFY_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "verify", callId: body.data.callId });
+    const result = await gptJson(VERIFY_SYSTEM, user, { orgId: req.authUser!.uid, operation: "verify", callId: body.data.callId });
     return {
       ok: true,
       satisfied: Boolean(result.satisfied),
@@ -340,7 +344,7 @@ export async function assistRoutes(app: FastifyInstance) {
       .join("\n");
     const user = `CURRENT QUESTION: ${body.data.currentQuestion || "(none yet)"}\n\nRECENT TRANSCRIPT (labels may be wrong — judge by content):\n${lines}`;
     const result = await gptJson(DETECT_SYSTEM, user, {
-      orgId: req.authUser!.orgId,
+      orgId: req.authUser!.uid,
       operation: "detect",
       callId: body.data.callId,
     });
@@ -359,11 +363,11 @@ export async function assistRoutes(app: FastifyInstance) {
       .object({ callId: z.string().uuid(), history: historySchema.default([]) })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
-    const ctx = await loadJdResume(body.data.callId, req.authUser!.orgId);
+    const ctx = await loadJdResume(body.data.callId, req.authUser!.uid);
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL INTERVIEW:\n${fmtHistory(body.data.history)}`;
-    const result = await gptJson(FINAL_SYSTEM, user, { orgId: req.authUser!.orgId, operation: "final", callId: body.data.callId });
+    const result = await gptJson(FINAL_SYSTEM, user, { orgId: req.authUser!.uid, operation: "final", callId: body.data.callId });
 
     const evaluation = {
       kind: "interview_eval" as const,
@@ -381,7 +385,7 @@ export async function assistRoutes(app: FastifyInstance) {
 
     // Save the score + summary + rubric on the call row (jsonb `summary`).
     try {
-      await collections.callSessions().updateOne(
+      await collections.interviews().updateOne(
         { id: body.data.callId },
         { $set: { summary: evaluation, endedAt: new Date(), status: "ended" } },
       );
@@ -394,8 +398,8 @@ export async function assistRoutes(app: FastifyInstance) {
 
   // Fetch a saved evaluation (score + summary + rubric + Q&A) for a call.
   app.get<{ Params: { callId: string } }>("/:callId/evaluation", async (req, reply) => {
-    const call = await collections.callSessions().findOne<{ orgId: string; summary: unknown }>({ id: req.params.callId });
-    if (!call || call.orgId !== req.authUser!.orgId) return reply.code(404).send({ error: "not_found" });
+    const call = await collections.interviews().findOne<{ recruiterUserId: string; summary: unknown }>({ id: req.params.callId });
+    if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
     const evalData = call.summary as { kind?: string } | null;
     if (!evalData || evalData.kind !== "interview_eval") return { ok: true, evaluation: null };
     return { ok: true, evaluation: evalData };
@@ -404,7 +408,7 @@ export async function assistRoutes(app: FastifyInstance) {
   // Token-usage + cost summary for the Live Assist co-pilot (this org).
   app.get<{ Querystring: { days?: string } }>("/usage", async (req) => {
     const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
-    const summary = await usageSummary(req.authUser!.orgId, days);
+    const summary = await usageSummary(req.authUser!.uid, days);
     return { ok: true, ...summary };
   });
 }

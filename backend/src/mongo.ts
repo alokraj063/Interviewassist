@@ -44,50 +44,35 @@ export function cleanMany<T extends Record<string, unknown>>(docs: T[]): T[] {
   return docs.map((d) => clean(d) as T);
 }
 
-// Named collection accessors for the live feature (one per former table).
+// Collection accessors. Two groups only:
+//
+//   • `ol*`        — OfferLetter-owned (READ-ONLY). We touch these to honour
+//                    the shared session + pull live jobs scoped to the
+//                    logged-in recruiter.
+//   • `interviews` — the ONE collection this service writes. Every piece of
+//                    state for an interview lives inline on the document:
+//                    who-spoke-to-whom, the demand snapshot, the transcript
+//                    array, and the final AI summary. No side tables.
+//
+// Legacy accessors (transcriptTurns / suggestions / evaluations /
+// aiUsageEvents / callSessions and the old multi-tenant set) are gone. If a
+// piece of code still references them it needs to be ported to read/write
+// the inline fields on `interviews`.
 export const collections = {
-  users: () => col("users"),
-  organizations: () => col("organizations"),
-  memberships: () => col("memberships"),
-  rolePermissions: () => col("role_permissions"),
-  refreshTokens: () => col("refresh_tokens"),
-  callSessions: () => col("call_sessions"),
-  transcriptTurns: () => col("transcript_turns"),
-  suggestions: () => col("suggestions"),
-  candidates: () => col("candidates"),
-  candidateSkills: () => col("candidate_skills"),
-  demands: () => col("demands"),
-  demandSkills: () => col("demand_skills"),
-  demandAssignments: () => col("demand_assignments"),
-  prospects: () => col("prospects"),
-  clients: () => col("clients"),
-  questionBanks: () => col("question_banks"),
-  questionBankQuestions: () => col("question_bank_questions"),
-  questionBankDemandLinks: () => col("question_bank_demand_links"),
-  aiUsageEvents: () => col("ai_usage_events"),
-  skills: () => col("skills"),
-  tenantIntegrations: () => col("tenant_integrations"),
+  // ── OL-owned (read-only from this service) ──────────────────────────
+  olUsers:              () => col("users"),
+  olSessions:           () => col("sessions"),
+  olJobPostings:        () => col("jobPostings"),
+  olJobAssignMappings:  () => col("jobAssignMappings"),
+  olClients:            () => col("clients"),
+
+  // ── Interview-Assist owned (writeable) ──────────────────────────────
+  interviews:           () => col("ia_interviews"),
 };
 
-// Create the indexes the feature relies on. Idempotent.
+// Indexes for the single IA collection — idempotent.
+// Lookups against OL collections rely on the indexes OL already creates.
 export async function ensureIndexes(): Promise<void> {
-  await collections.users().createIndex({ id: 1 }, { unique: true });
-  await collections.users().createIndex({ emailNormalized: 1 });
-  await collections.organizations().createIndex({ id: 1 }, { unique: true });
-  await collections.memberships().createIndex({ userId: 1, orgId: 1 });
-  await collections.rolePermissions().createIndex({ orgId: 1, role: 1 });
-  await collections.refreshTokens().createIndex({ tokenHash: 1 });
-  await collections.callSessions().createIndex({ id: 1 }, { unique: true });
-  await collections.callSessions().createIndex({ orgId: 1 });
-  await collections.transcriptTurns().createIndex({ callId: 1 });
-  await collections.candidates().createIndex({ id: 1 }, { unique: true });
-  await collections.candidates().createIndex({ orgId: 1 });
-  await collections.demands().createIndex({ id: 1 }, { unique: true });
-  await collections.demands().createIndex({ orgId: 1 });
-  await collections.questionBanks().createIndex({ orgId: 1 });
-  await collections.questionBankQuestions().createIndex({ bankId: 1 });
-  await collections.questionBankDemandLinks().createIndex({ demandId: 1 });
-  await collections.questionBankDemandLinks().createIndex({ bankId: 1, demandId: 1 }, { unique: true });
-  await collections.aiUsageEvents().createIndex({ orgId: 1, createdAt: -1 });
-  await collections.prospects().createIndex({ orgId: 1, demandId: 1 });
+  await collections.interviews().createIndex({ id: 1 }, { unique: true });
+  await collections.interviews().createIndex({ recruiterUid: 1, startedAt: -1 });
 }

@@ -23,6 +23,7 @@
     "argon2": "^0.44.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
+    "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.3.0",
     "openai": "^4.60.0",
     "pino": "^9.3.2",
@@ -32,6 +33,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.5.0",
     "@types/sentiment": "^5.0.4",
     "@types/ws": "^8.5.12",

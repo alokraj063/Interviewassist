@@ -5,52 +5,26 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { loadAuthUser, type AuthUser } from "./auth/context.js";
+import { authenticateOl, type OlAuthUser } from "./auth/olAuth.js";
 import { env } from "./env.js";
-import { authRoutes } from "./routes/auth.js";
 import { callsRoutes } from "./routes/calls.js";
 import { assistRoutes } from "./routes/assist.js";
 import { healthRoutes } from "./routes/health.js";
-import { orgRoutes } from "./routes/org.js";
-import { platformRoutes } from "./routes/platform.js";
-import { rolesRoutes } from "./routes/roles.js";
 import { candidatesRoutes } from "./routes/candidates.js";
 import { demandsRoutes } from "./routes/demands.js";
-import { clientsRoutes } from "./routes/clients.js";
-import { prospectsRoutes } from "./routes/prospects.js";
-import { teamsRoutes } from "./routes/teams.js";
-import { usersRoutes } from "./routes/users.js";
-import { questionBanksRoutes } from "./routes/question-banks.js";
 import { registerAgentWs } from "./ws/agent.js";
 import { registerCustomTranscriberWs } from "./ws/custom-transcriber.js";
 import { registerIngestWs } from "./ws/ingest.js";
 import { registerIngestCallWs } from "./ws/ingest-call.js";
 import { registerSessionWs } from "./ws/session.js";
 
-// JWT access token payload. Short-lived (15m); refresh via cookie + /api/auth/refresh.
+// We don't sign our own JWTs anymore — the OL cookie carries the session.
+// Kept as an unused type so other modules that import it still type-check
+// during the migration; can be removed once nothing references it.
 export interface JwtPayload {
-  sub: string; // user id
+  sub: string;
   email: string;
-  orgId: string;
-  role:
-    | "recruiter"
-    | "delivery_lead"
-    | "account_manager"
-    | "business_head"
-    | "qa_reviewer"
-    | "admin"
-    | "client_user"
-    | "proctor";
-  mfaVerified: boolean;
-  /** True for super-admins who administrate tenants. Gated by `requirePlatformAdmin`. */
-  isPlatformAdmin?: boolean;
-}
-
-declare module "@fastify/jwt" {
-  interface FastifyJWT {
-    payload: JwtPayload;
-    user: JwtPayload;
-  }
+  role: string;
 }
 
 export async function buildServer(): Promise<FastifyInstance> {
@@ -98,67 +72,44 @@ export async function buildServer(): Promise<FastifyInstance> {
     },
   });
 
-  // Verify JWT + hydrate req.authUser with membership + permissions.
-  // Keeps req.user as the raw JWT payload (fastify-jwt convention).
+  // Verify the OfferLetter (OL) cookie / Bearer token. No separate login is
+  // run here — the same session that logged the user into OL is honoured
+  // directly. `request.authUser` is populated with the OL actor; downstream
+  // routes scope their queries by `authUser.uid` / `authUser.mongoId`.
   //
-  // Supports two token transports:
-  //   1. Authorization: Bearer <token>  (default for SPA fetches)
-  //   2. ?token=<token> query param      (used by <audio>/<img> tags that
-  //                                       can't set custom headers; the
-  //                                       call recording endpoint relies
-  //                                       on this)
+  // Transports supported:
+  //   1. Cookie  authToken=<jwt>
+  //   2. Header  Authorization: Bearer <jwt>
+  //   3. Query   ?token=<jwt>  (for WebSockets that can't set headers)
   app.decorate("authenticate", async function (request: FastifyRequest, reply: FastifyReply) {
-    try {
-      // If no Authorization header but a token query param exists, promote
-      // it to the Authorization header so jwtVerify finds it.
-      if (!request.headers.authorization) {
-        const queryToken = (request.query as { token?: string } | undefined)?.token;
-        if (queryToken) {
-          request.headers.authorization = `Bearer ${queryToken}`;
-        }
-      }
-      await request.jwtVerify();
-    } catch {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
-    const payload = request.user as JwtPayload;
-    const ctx = await loadAuthUser(payload.sub, payload.orgId);
+    const ctx = await authenticateOl(request);
     if (!ctx) return reply.code(401).send({ error: "unauthorized" });
     request.authUser = ctx;
   });
 
-  app.decorate("requirePermission", function (permission: string) {
+  // Permission system was tied to the old org/role mapping. With OL SSO, we
+  // gate by `User.type` — but most routes are recruiter-personal anyway so
+  // these helpers default to "logged-in OK". Routes that need a specific
+  // role compare `authUser.role` themselves.
+  app.decorate("requirePermission", function (_permission: string) {
     return async function (request: FastifyRequest, reply: FastifyReply) {
-      const ctx = request.authUser;
-      if (!ctx) return reply.code(401).send({ error: "unauthorized" });
-      if (!ctx.permissions.includes(permission)) {
-        return reply.code(403).send({ error: "forbidden", permission });
-      }
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
     };
   });
-
-  // Gate /api/platform/* routes. Distinct from `requirePermission` because
-  // platform admins have no org-scoped permissions.
   app.decorate("requirePlatformAdmin", async function (request: FastifyRequest, reply: FastifyReply) {
-    const ctx = request.authUser;
-    if (!ctx) return reply.code(401).send({ error: "unauthorized" });
-    if (!ctx.isPlatformAdmin) return reply.code(403).send({ error: "platform_admin_required" });
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    if (request.authUser.role !== "UserAdmin") return reply.code(403).send({ error: "admin_required" });
   });
 
   await app.register(healthRoutes);
-  await app.register(authRoutes, { prefix: "/api/auth" });
-  await app.register(callsRoutes, { prefix: "/api/calls" });
-  await app.register(assistRoutes, { prefix: "/api/assist" });
+  await app.register(callsRoutes,      { prefix: "/api/calls" });
+  await app.register(assistRoutes,     { prefix: "/api/assist" });
   await app.register(candidatesRoutes, { prefix: "/api/candidates" });
-  await app.register(demandsRoutes, { prefix: "/api/demands" });
-  await app.register(clientsRoutes, { prefix: "/api/clients" });
-  await app.register(prospectsRoutes, { prefix: "/api/prospects" });
-  await app.register(usersRoutes, { prefix: "/api/users" });
-  await app.register(teamsRoutes, { prefix: "/api/teams" });
-  await app.register(rolesRoutes, { prefix: "/api/roles" });
-  await app.register(orgRoutes, { prefix: "/api/org" });
-  await app.register(platformRoutes, { prefix: "/api/platform" });
-  await app.register(questionBanksRoutes, { prefix: "/api/question-banks" });
+  await app.register(demandsRoutes,    { prefix: "/api/demands" });
+  // Routes that were tied to the old multi-tenant model — clients /
+  // prospects / users / teams / roles / org / platform / question-banks /
+  // auth (login/signup) — are no longer registered. The OL app owns those
+  // surfaces; we just reuse its session.
 
   await registerIngestWs(app);
   await registerIngestCallWs(app);
@@ -176,6 +127,6 @@ declare module "fastify" {
     requirePlatformAdmin: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
   interface FastifyRequest {
-    authUser?: AuthUser;
+    authUser?: OlAuthUser;
   }
 }

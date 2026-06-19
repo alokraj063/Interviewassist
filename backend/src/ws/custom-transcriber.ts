@@ -69,13 +69,11 @@ async function resolveProviderApiKey(
   provider: ProviderKey,
   callId: string | undefined,
 ): Promise<string | null> {
-  let orgId: string | null = null;
-  if (callId) {
-    const row = await collections.callSessions().findOne<{ orgId: string }>({ id: callId });
-    orgId = row?.orgId ?? null;
-  }
-  if (orgId) {
-    const secret = await getProviderCredentials(orgId, provider);
+  // Multi-tenant integration credentials are gone — every provider resolves
+  // from env. `callId` is kept on the signature so call sites don't change.
+  void callId;
+  {
+    const secret = await getProviderCredentials("", provider);
     if (secret) {
       return provider === "sarvam"
         ? (secret as { apiSubscriptionKey: string }).apiSubscriptionKey
@@ -162,10 +160,14 @@ export async function registerCustomTranscriberWs(app: FastifyInstance): Promise
       if (!callId) return;
       try {
         turn.id = Date.now();
-        await collections.transcriptTurns().insertOne({
-          docId: randomUUID(), id: turn.id, callId, speaker: turn.speaker, text: turn.text,
-          isFinal: true, tsStartMs: turn.tsStartMs, tsEndMs: turn.tsEndMs, sentiment: null, createdAt: new Date(),
-        });
+        void randomUUID;
+        const turnDoc = {
+          id: turn.id, speaker: turn.speaker, text: turn.text,
+          tsStartMs: turn.tsStartMs, tsEndMs: turn.tsEndMs,
+          isFinal: true, createdAt: new Date(),
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await collections.interviews().updateOne({ id: callId }, { $push: { transcript: turnDoc } } as any);
       } catch (err) {
         app.log.error({ err, callId }, "failed to persist custom-transcriber turn");
       }

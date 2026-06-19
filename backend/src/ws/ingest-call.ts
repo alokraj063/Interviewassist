@@ -71,7 +71,7 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
     }
 
     // Look up the call so we know which org + STT provider to use.
-    const row = await collections.callSessions().findOne<{
+    const row = await collections.interviews().findOne<{
       id: string; orgId: string; recruiterUserId: string | null; mode: string;
       transcriberProvider: string | null; transcriberModel: string | null; transcriberLanguage: string | null;
     }>({ id: callId });
@@ -157,7 +157,7 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
       const recruiterRel = dumper?.relativePaths.recruiter ?? null;
       if (recruiterRel) {
         try {
-          await collections.callSessions().updateOne(
+          await collections.interviews().updateOne(
             { id: callId },
             { $set: { recordingUrl: recruiterRel, recordingDurationMs: durationMs, recordingMime: "audio/wav" } },
           );

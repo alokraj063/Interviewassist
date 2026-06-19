@@ -9,7 +9,6 @@
 //
 // Callers should treat the returned credentials as opaque — pass them straight
 // into the upstream client. Plaintext must never appear in API responses or logs.
-import { collections } from "../mongo.js";
 import { env } from "../env.js";
 
 export type TenantIntegrationProvider = "vapi" | "deepgram" | "sarvam" | "shunya" | "rekognition";
@@ -35,20 +34,18 @@ type SecretFor<P extends TenantIntegrationProvider> = P extends "vapi"
           ? RekognitionSecret
           : never;
 
+// Multi-tenant per-org credentials were dropped along with the rest of the
+// org/clients machinery; this service now runs as a single shared tenant so
+// every provider resolves from process env. The orgId argument is kept for
+// call-site compatibility but ignored.
 export async function getProviderCredentials<P extends TenantIntegrationProvider>(
-  orgId: string,
+  _orgId: string,
   provider: P,
 ): Promise<SecretFor<P> | null> {
-  // 1) Tenant-stored row.
-  const row = await collections.tenantIntegrations().findOne<{ ciphertext: string; enabled: boolean }>({ orgId, provider });
-  if (row?.enabled) {
-    const secret = decryptSecret<TenantIntegrationSecret>(row.ciphertext);
-    if (secret.provider === provider) return secret as SecretFor<P>;
-  }
-  // 2) Env fallback.
+  void decryptSecret;
+  void _orgId;
   const fallback = envFallback(provider);
   if (fallback) return fallback as SecretFor<P>;
-  // 3) Nothing configured.
   return null;
 }
 
@@ -83,27 +80,13 @@ function envFallback(provider: TenantIntegrationProvider): TenantIntegrationSecr
   }
 }
 
-// Lists which providers a tenant has explicitly configured (regardless of
-// whether they're enabled). Used by the platform/integrations UI; never returns
-// plaintext.
-export async function listTenantIntegrations(orgId: string): Promise<
-  Array<{
-    provider: TenantIntegrationProvider;
-    enabled: boolean;
-    updatedAt: Date;
-  }>
+// `listTenantIntegrations` used to query the per-tenant `tenant_integrations`
+// SQL table. With multi-tenant gone we just report what the env exposes — the
+// platform UI that consumed this is also gone, but the export stays to avoid
+// a breaking change for any background script that still imports it.
+export async function listTenantIntegrations(_orgId: string): Promise<
+  Array<{ provider: TenantIntegrationProvider; enabled: boolean; updatedAt: Date }>
 > {
-  const rows = await db
-    .select({
-      provider: tenantIntegrations.provider,
-      enabled: tenantIntegrations.enabled,
-      updatedAt: tenantIntegrations.updatedAt,
-    })
-    .from(tenantIntegrations)
-    .where(eq(tenantIntegrations.orgId, orgId));
-  return rows.map((r) => ({
-    provider: r.provider as TenantIntegrationProvider,
-    enabled: r.enabled,
-    updatedAt: r.updatedAt,
-  }));
+  void _orgId;
+  return [];
 }

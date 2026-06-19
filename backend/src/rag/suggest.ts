@@ -12,14 +12,10 @@ import { chatModel, env } from "../env.js";
 import { recordUsage } from "../usage/tracker.js";
 import { broadcastToCall } from "../ws/session.js";
 
-// Cache callId → orgId so the per-turn usage record doesn't re-query each time.
-const orgIdCache = new Map<string, string>();
+// Usage tracking is a no-op now (see usage/tracker.ts), so this helper just
+// returns the callId so the caller has a stable string to log.
 async function orgIdForCall(callId: string): Promise<string | null> {
-  const hit = orgIdCache.get(callId);
-  if (hit) return hit;
-  const row = await collections.callSessions().findOne<{ orgId: string }>({ id: callId });
-  if (row?.orgId) orgIdCache.set(callId, row.orgId);
-  return row?.orgId ?? null;
+  return callId;
 }
 
 // System prompt kept intentionally >1024 tokens so OpenAI prompt caching can
@@ -412,20 +408,10 @@ export async function maybeSuggest(
       latencyMs,
     });
 
-    try {
-      await collections.suggestions().insertOne({
-        id: randomUUID(),
-        callId,
-        triggerTurnId: triggerTurnId ?? null,
-        kind: "live",
-        content: payload,
-        citations: payload.citations,
-        latencyMs,
-        createdAt: new Date(),
-      });
-    } catch (err) {
-      log.warn({ err, callId }, "persist suggestion failed");
-    }
+    // Suggestions are live-only — streamed to the recruiter via WS, not
+    // persisted. The post-call review focuses on transcript + summary; the
+    // running suggestion feed isn't useful after the fact.
+    void randomUUID; void triggerTurnId; void latencyMs;
   } catch (err) {
     log.error({ err, callId }, "suggestion loop failed");
     broadcastToCall(callId, {
@@ -519,8 +505,20 @@ function formatRecruiterContext(c: RecruiterCallContext): string {
 }
 
 async function loadRecruiterContext(callId: string): Promise<RecruiterCallContext> {
-  const session = await collections.callSessions().findOne<{
-    demandId: string | null; candidateId: string | null; transcriberLanguage: string | null;
+  // Build the suggestion context entirely from the inline interview doc —
+  // no side lookups into "demands"/"candidates"/"clients" any more.
+  const session = await collections.interviews().findOne<{
+    transcriberLanguage?: string | null;
+    demandSnapshot?: {
+      title?: string | null; designation?: string | null; client?: string | null;
+      experienceFrom?: number | null; experienceTo?: number | null;
+      salaryFrom?: number | null; salaryTo?: number | null;
+      primaryLocation?: string | null;
+    } | null;
+    candidate?: {
+      name?: string | null; currentTitle?: string | null; currentCompany?: string | null;
+      totalExperienceYears?: number | null; currentLocation?: string | null;
+    } | null;
   }>({ id: callId });
 
   const ctx: RecruiterCallContext = {
@@ -529,38 +527,32 @@ async function loadRecruiterContext(callId: string): Promise<RecruiterCallContex
     demand: null,
     candidate: null,
   };
-  if (session?.demandId) {
-    const d = await collections.demands().findOne<{
-      title: string | null; designation: string | null; salaryFrom: string | null; salaryTo: string | null;
-      experienceMinYears: string | null; experienceMaxYears: string | null; primaryLocation: string | null;
-      probingDetails: { workMode?: string } | null; isVip: boolean; clientId: string | null;
-    }>({ id: session.demandId });
-    if (d) {
-      let customer: string | null = null;
-      if (d.clientId) {
-        const c = await collections.clients().findOne<{ companyName: string }>({ id: d.clientId });
-        customer = c?.companyName ?? null;
-      }
-      ctx.demand = {
-        title: d.title, designation: d.designation,
-        salaryFromLakhs: d.salaryFrom, salaryToLakhs: d.salaryTo,
-        experienceMinYears: d.experienceMinYears, experienceMaxYears: d.experienceMaxYears,
-        primaryLocation: d.primaryLocation,
-        workMode: d.probingDetails?.workMode ?? null,
-        isVip: !!d.isVip, customer,
-      };
-    }
+  const d = session?.demandSnapshot;
+  if (d) {
+    ctx.demand = {
+      title: d.title ?? null,
+      designation: d.designation ?? null,
+      salaryFromLakhs: d.salaryFrom != null ? String(d.salaryFrom) : null,
+      salaryToLakhs: d.salaryTo != null ? String(d.salaryTo) : null,
+      experienceMinYears: d.experienceFrom != null ? String(d.experienceFrom) : null,
+      experienceMaxYears: d.experienceTo != null ? String(d.experienceTo) : null,
+      primaryLocation: d.primaryLocation ?? null,
+      workMode: null,
+      isVip: false,
+      customer: d.client ?? null,
+    };
   }
-  if (session?.candidateId) {
-    const k = await collections.candidates().findOne<{
-      displayName: string | null; currentCompany: string | null; currentTitle: string | null;
-      totalExperienceYears: string | null; currentCtcLakhs: string | null; expectedCtcLakhs: string | null;
-      noticePeriodDays: number | null; currentLocation: string | null;
-    }>({ id: session.candidateId });
-    if (k) ctx.candidate = {
-      displayName: k.displayName, currentCompany: k.currentCompany, currentTitle: k.currentTitle,
-      totalExperienceYears: k.totalExperienceYears, currentCtcLakhs: k.currentCtcLakhs,
-      expectedCtcLakhs: k.expectedCtcLakhs, noticePeriodDays: k.noticePeriodDays, currentLocation: k.currentLocation,
+  const k = session?.candidate;
+  if (k) {
+    ctx.candidate = {
+      displayName: k.name ?? null,
+      currentCompany: k.currentCompany ?? null,
+      currentTitle: k.currentTitle ?? null,
+      totalExperienceYears: k.totalExperienceYears != null ? String(k.totalExperienceYears) : null,
+      currentCtcLakhs: null,
+      expectedCtcLakhs: null,
+      noticePeriodDays: null,
+      currentLocation: k.currentLocation ?? null,
     };
   }
   return ctx;
@@ -584,7 +576,13 @@ async function relabelLastSpeaker(
   last.speaker = role; // keep the in-memory ring buffer consistent for next pass
   broadcastToCall(callId, { type: "transcript.relabel", turnId: last.id, speaker: role });
   try {
-    await collections.transcriptTurns().updateOne({ id: last.id }, { $set: { speaker: role } });
+    // Flip the speaker on the matching transcript element inside the
+    // interview doc. `transcript.id` is the per-turn numeric id we set when
+    // the turn was pushed.
+    await collections.interviews().updateOne(
+      { id: callId, "transcript.id": last.id },
+      { $set: { "transcript.$.speaker": role } },
+    );
   } catch (err) {
     log.warn({ err, callId, turnId: last.id }, "speaker relabel persist failed");
   }

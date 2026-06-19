@@ -14,10 +14,30 @@ const schema = z.object({
   API_PORT: z.coerce.number().int().positive().default(8787),
   API_PUBLIC_URL: z.string().url().default("http://localhost:8787"),
   APP_BASE_URL: z.string().url().default("http://localhost:5173"),
-  JWT_SECRET: z.string().min(32),
-  // MongoDB is the datastore (replaced Postgres). Local default.
-  MONGO_URL: z.string().default("mongodb://localhost:27017"),
-  MONGO_DB: z.string().default("interview_assist"),
+  // Kept only for any legacy code path that still signs an internal token; no
+  // longer used to verify incoming requests — those use OL_JWT_KEY below.
+  JWT_SECRET: z.string().min(32).default("recruit-assist-internal-token-key-not-used-for-incoming-32+chars"),
+
+  // ─── OfferLetter (OL) auth — single sign-on ────────────────────────────
+  // We verify the cookie that the OfferLetter app already sets. Reuse the
+  // exact secret that backs OL's `jwt.sign(...)` so we don't run a second
+  // login flow. Cookie name + payload shape is documented in
+  // /home/developer/J2W/J2W_OfferLetter_2026/INTERVIEW_BACKEND_AUTH.md.
+  OL_JWT_KEY: z.string().min(16).default("7ff3629c451a6088086ea601e16cf11bd4e8ec3f-secret-j2w-offerletter-2026-key"),
+  OL_AUTH_COOKIE_NAME: z.string().default("authToken"),
+  // When true, also check the OL `sessions` collection for jti revocation
+  // (matches OL's own middleware). Turn off for local dev where you might
+  // be testing tokens minted without a session row.
+  OL_VERIFY_SESSION_REVOCATION: z
+    .preprocess((v) => (typeof v === "string" ? v.toLowerCase() !== "false" : v ?? true), z.boolean())
+    .default(true),
+
+  // ─── MongoDB — SAME cluster + DB as OfferLetter ─────────────────────────
+  // Defaults to OL's staging URI so both apps share a single source of truth
+  // for users / jobPostings / sessions. Override either var locally if you
+  // need to point at a throwaway Mongo for testing.
+  MONGO_URL: z.string().default("mongodb+srv://technology_db_user:JH8fA9SqUBf4rCP3@j2wofferletter.acjnjw8.mongodb.net/?retryWrites=true&w=majority"),
+  MONGO_DB: z.string().default("j2wOfferletter-staging-2026"),
   // Legacy — no longer used (kept optional so old .env files don't break).
   DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),

@@ -1,98 +1,158 @@
-// Demands (JD) API (MongoDB) — list / create / JD parse / prospects for Live Assist.
-import { randomUUID } from "node:crypto";
+// Demands (JDs) for Interview Assist.
+//
+// IMPORTANT change from the old multi-tenant impl: we DO NOT keep our own
+// `demands` collection any more. Jobs come live from the OfferLetter app's
+// `jobPostings` collection, scoped to the recruiter that owns them via
+// the `jobAssignMappings` collection (one mapping row per recruiter assigned
+// to a job, with `status: "assigned"`).
+//
+// We also resolve the `clientId` → `companyName` on read so the picker can
+// show a human-friendly client label, but neither collection is written to.
+
 import type { FastifyInstance } from "fastify";
-import { z } from "zod";
+import { ObjectId } from "mongodb";
 import { collections } from "../mongo.js";
-import { parseDocument } from "@j2w/ingest-shared";
 
-const createSchema = z.object({
-  clientId: z.string().uuid(),
-  title: z.string().min(2).max(200),
-  designation: z.string().max(200).optional(),
-  description: z.string().max(20_000).optional(),
-  responsibilities: z.string().max(20_000).optional(),
-  experienceMinYears: z.number().min(0).max(50).optional(),
-  experienceMaxYears: z.number().min(0).max(50).optional(),
-  salaryFrom: z.number().min(0).optional(),
-  salaryTo: z.number().min(0).optional(),
-  primaryLocation: z.string().max(120).optional(),
-  status: z.enum(["draft", "active", "on_hold", "closed", "cancelled"]).default("active"),
-  isVip: z.boolean().default(false),
-});
+interface OlJobPosting {
+  _id: ObjectId;
+  uid: string;
+  title?: string;
+  designation?: string;
+  status?: string;
+  isActive?: boolean;
+  primaryLocation?: string;
+  location?: string;
+  noOfOpening?: number;
+  experienceFrom?: number;
+  experienceTo?: number;
+  salaryFrom?: number;
+  salaryTo?: number;
+  clientId?: ObjectId;
+  rawJdText?: string;
+  description?: string;
+  responsibilities?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
 
-async function clientNameMap(orgId: string): Promise<Map<string, string>> {
-  const rows = await collections.clients().find<{ id: string; companyName: string }>({ orgId }).toArray();
-  return new Map(rows.map((r) => [r.id, r.companyName]));
+interface OlClient {
+  _id: ObjectId;
+  companyName?: string;
+}
+
+// Map an OL JobPosting → the shape the Live Assist frontend expects from
+// `GET /api/demands`. Field names follow the original Postgres schema so
+// the React Query hook + zod types in the inter/frontend port still work.
+function adaptDemand(jp: OlJobPosting, clientName: string | null) {
+  return {
+    id: jp._id.toHexString(),                  // we use the Mongo _id as the API id
+    uid: jp.uid,                               // OL's business UID — handy for logging
+    title: jp.title ?? null,
+    designation: jp.designation ?? null,
+    status: (jp.status || (jp.isActive === false ? "closed" : "active")).toLowerCase(),
+    isVip: false,
+    primaryLocation: jp.primaryLocation ?? jp.location ?? null,
+    salaryFrom: jp.salaryFrom != null ? String(jp.salaryFrom) : null,
+    salaryTo:   jp.salaryTo   != null ? String(jp.salaryTo)   : null,
+    experienceMinYears: jp.experienceFrom != null ? String(jp.experienceFrom) : null,
+    experienceMaxYears: jp.experienceTo   != null ? String(jp.experienceTo)   : null,
+    numberOfOpenings: jp.noOfOpening ?? 1,
+    maxSubmissions: null,
+    expectedClosureDate: null,
+    clientId: jp.clientId ? jp.clientId.toHexString() : null,
+    clientName,
+    createdAt: jp.createdAt ?? new Date(0),
+    updatedAt: jp.updatedAt ?? new Date(0),
+  };
+}
+
+// Match OL's `fetchAllJobs` visibility rule exactly so the picker shows the
+// same jobs the recruiter sees on /job_postings:
+//   • Recruiter / Account Manager / Lead → own assigned jobs (jobAssignMappings)
+//   • Business Head                       → own + every AM reporting to them
+async function resolveAssigneeIds(ctx: { mongoId: string; role: string }): Promise<ObjectId[]> {
+  const selfId = new ObjectId(ctx.mongoId);
+  if (ctx.role !== "UserBusinessHead") return [selfId];
+  const ams = await collections.olUsers()
+    .find<{ _id: ObjectId }>({ reportingTo: selfId, type: "UserAccountManager" })
+    .project({ _id: 1 })
+    .toArray();
+  return [selfId, ...ams.map((a) => a._id)];
 }
 
 export async function demandsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
-  const read = app.requirePermission("demands.read");
-  const write = app.requirePermission("demands.write");
 
-  app.get("/", { preHandler: [read] }, async (req) => {
-    const orgId = req.authUser!.orgId;
-    const rows = await collections.demands().find({ orgId }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).limit(500).toArray();
-    const clients = await clientNameMap(orgId);
-    const demands = rows.map((d) => ({
-      id: d.id, title: d.title ?? null, designation: d.designation ?? null, status: d.status ?? "active",
-      isVip: !!d.isVip, primaryLocation: d.primaryLocation ?? null,
-      salaryFrom: d.salaryFrom ?? null, salaryTo: d.salaryTo ?? null,
-      experienceMinYears: d.experienceMinYears ?? null, experienceMaxYears: d.experienceMaxYears ?? null,
-      numberOfOpenings: d.numberOfOpenings ?? 1, maxSubmissions: d.maxSubmissions ?? null,
-      expectedClosureDate: d.expectedClosureDate ?? null,
-      clientId: d.clientId ?? null, clientName: d.clientId ? clients.get(d.clientId) ?? null : null,
-    }));
+  // List demands assigned to the logged-in user. Same scope as the OL
+  // /job_postings page. Response shape `{ demands: [...] }` matches the
+  // existing frontend hook.
+  app.get("/", async (req) => {
+    const ctx = req.authUser!;
+
+    // 1. Visibility scope: own (+ reporting AMs if BH).
+    const assigneeIds = await resolveAssigneeIds(ctx);
+    const jobIds = await collections.olJobAssignMappings()
+      .distinct("jobPostingId", { userId: { $in: assigneeIds } });
+    if (jobIds.length === 0) return { demands: [] };
+
+    // 2. Load the job postings. No status filter — same as OL's listing.
+    const jobs = await collections.olJobPostings()
+      .find<OlJobPosting>({ _id: { $in: jobIds as ObjectId[] } })
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .toArray();
+
+    // 3. Resolve client names in one query.
+    const clientIds = [...new Set(jobs.map((j) => j.clientId).filter(Boolean) as ObjectId[])];
+    const clients = clientIds.length
+      ? await collections.olClients().find<OlClient>({ _id: { $in: clientIds } })
+          .project({ _id: 1, companyName: 1 })
+          .toArray()
+      : [];
+    const nameByClient = new Map(clients.map((c) => [c._id.toHexString(), c.companyName ?? null]));
+
+    const demands = jobs.map((j) => adaptDemand(j, j.clientId ? nameByClient.get(j.clientId.toHexString()) ?? null : null));
     return { demands };
   });
 
-  app.post("/", { preHandler: [write] }, async (req, reply) => {
-    const parsed = createSchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_payload", issues: parsed.error.flatten() });
-    const d = parsed.data;
-    const client = await collections.clients().findOne({ id: d.clientId, orgId: req.authUser!.orgId });
-    if (!client) return reply.code(400).send({ error: "client_not_found" });
-    const id = randomUUID();
-    const now = new Date();
-    await collections.demands().insertOne({
-      id, orgId: req.authUser!.orgId, clientId: d.clientId, title: d.title,
-      designation: d.designation ?? d.title, description: d.description ?? null,
-      responsibilities: d.responsibilities ?? null,
-      experienceMinYears: d.experienceMinYears != null ? String(d.experienceMinYears) : null,
-      experienceMaxYears: d.experienceMaxYears != null ? String(d.experienceMaxYears) : null,
-      salaryFrom: d.salaryFrom != null ? String(d.salaryFrom) : null,
-      salaryTo: d.salaryTo != null ? String(d.salaryTo) : null,
-      primaryLocation: d.primaryLocation ?? null, status: d.status, isVip: d.isVip,
-      numberOfOpenings: 1, probingDetails: {}, createdAt: now, updatedAt: now,
+  // Demand detail — same scoping (must be one of the recruiter's jobs).
+  app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    const ctx = req.authUser!;
+    let jobOid: ObjectId;
+    try { jobOid = new ObjectId(req.params.id); }
+    catch { return reply.code(400).send({ error: "invalid_id" }); }
+
+    // Ownership check — same scope as the listing.
+    const assigneeIds = await resolveAssigneeIds(ctx);
+    const mapping = await collections.olJobAssignMappings().findOne({
+      userId: { $in: assigneeIds },
+      jobPostingId: jobOid,
     });
-    return { demandId: id };
-  });
+    if (!mapping) return reply.code(404).send({ error: "demand_not_found_or_unassigned" });
 
-  // JD file → text.
-  app.post("/parse-jd", { preHandler: [write] }, async (req, reply) => {
-    if (!req.isMultipart()) return reply.code(400).send({ error: "expected_multipart" });
-    const part = await req.file({ limits: { fileSize: 10 * 1024 * 1024 } });
-    if (!part) return reply.code(400).send({ error: "no_file" });
-    let buf: Buffer;
-    try { buf = await part.toBuffer(); } catch { return reply.code(413).send({ error: "file_too_large" }); }
-    try {
-      const { text } = await parseDocument(buf, part.mimetype, part.filename);
-      if (text.trim().length < 20) return reply.code(422).send({ error: "unparseable_jd" });
-      return { ok: true, text: text.trim().slice(0, 20_000), filename: part.filename ?? "jd" };
-    } catch (err) {
-      req.log.error({ err: (err as Error).message }, "parse_jd_failed");
-      return reply.code(502).send({ error: "parse_failed" });
+    const job = await collections.olJobPostings().findOne<OlJobPosting>({ _id: jobOid });
+    if (!job) return reply.code(404).send({ error: "demand_not_found" });
+
+    let clientName: string | null = null;
+    if (job.clientId) {
+      const c = await collections.olClients().findOne<OlClient>({ _id: job.clientId });
+      clientName = c?.companyName ?? null;
     }
+
+    return {
+      demand: {
+        ...adaptDemand(job, clientName),
+        description: job.description ?? job.rawJdText ?? null,
+        responsibilities: job.responsibilities ?? null,
+      },
+      clientName,
+      skills: [],
+      locations: [],
+      assignments: [],
+    };
   });
 
-  app.get<{ Params: { id: string } }>("/:id", { preHandler: [read] }, async (req, reply) => {
-    const d = await collections.demands().findOne({ id: req.params.id, orgId: req.authUser!.orgId }, { projection: { _id: 0 } });
-    if (!d) return reply.code(404).send({ error: "not_found" });
-    return d;
-  });
-
-  app.get<{ Params: { id: string } }>("/:id/prospects", { preHandler: [read] }, async (req) => {
-    const rows = await collections.prospects().find({ demandId: req.params.id, orgId: req.authUser!.orgId }, { projection: { _id: 0 } }).toArray();
-    return { prospects: rows };
-  });
+  // The legacy multi-tenant impl exposed prospects / submissions / parse-jd /
+  // create. Those are owned by the OfferLetter app — we no longer expose them
+  // here. Any consumer that hit them needs to talk to OL directly.
 }

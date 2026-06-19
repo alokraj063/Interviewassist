@@ -43,18 +43,22 @@ export async function handleMixedFinal(
   // keep a monotonic counter and store it on the Mongo doc.
   turn.id = nextTurnId();
   try {
-    await collections.transcriptTurns().insertOne({
-      docId: randomUUID(),
+    // Push the turn onto the interview's inline `transcript[]`. One doc per
+    // call holds everything we need for post-call review.
+    void randomUUID;
+    const turnDoc = {
       id: turn.id,
-      callId: turn.callId,
       speaker: role,
       text: turn.text,
-      isFinal: true,
       tsStartMs: turn.tsStartMs,
       tsEndMs: turn.tsEndMs,
-      sentiment: null,
+      isFinal: true,
       createdAt: new Date(),
-    });
+    };
+    // The Mongo driver's $push typings don't know about the inline
+    // `transcript[]` field on our interview doc — runtime is fine.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collections.interviews().updateOne({ id: turn.callId }, { $push: { transcript: turnDoc } } as any);
   } catch (err) {
     log.error({ err, callId: turn.callId }, "failed to persist mixed-mono transcript turn");
   }
