@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import type { SessionClientMessage, SessionServerMessage } from "@j2w/shared-types";
-import { getCallConfig } from "../translation/state.js";
 
 // Registry of connected browser sessions, keyed by callId. The ingest +
 // Deepgram pipeline (Phase 5) will look up this registry to push events.
@@ -52,12 +51,6 @@ export async function registerSessionWs(app: FastifyInstance): Promise<void> {
     sessions.set(callId, set);
 
     sock.send({ type: "hello", callId, ts: Date.now() });
-
-    // Echo any active translation config so a reconnecting browser can
-    // rebuild its UI (language pair, display mode, latency mode, etc.)
-    // without re-enabling translation itself.
-    const config = getCallConfig(callId);
-    sock.send({ type: "translation.config", config });
 
     socket.on("message", (raw: Buffer) => {
       try {
