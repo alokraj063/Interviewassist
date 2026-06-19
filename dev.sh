@@ -134,20 +134,22 @@ docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 \
 # 3) dependencies
 # ---------------------------------------------------------------------------
 if [ "${SKIP_INSTALL:-0}" != "1" ]; then
-  say "Installing dependencies (pnpm install)…"
-  $PNPM install
+  say "Installing backend dependencies…"
+  ( cd backend && $PNPM install )
+  say "Installing frontend dependencies…"
+  ( cd frontend && $PNPM install )
 fi
 
 # ---------------------------------------------------------------------------
 # 4) migrate (idempotent) + seed (only when empty, or 'seed' command)
 # ---------------------------------------------------------------------------
 say "Applying database migrations…"
-$PNPM db:migrate
+( cd backend && $PNPM db:migrate )
 
 CANDIDATE_COUNT="$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDB" -tAc "SELECT count(*) FROM candidates" 2>/dev/null || echo 0)"
 if [ "$FORCE_SEED" = "1" ] || [ "${CANDIDATE_COUNT:-0}" = "0" ]; then
   say "Seeding demo data (users, demands, candidates)…"
-  $PNPM db:seed
+  ( cd backend && $PNPM db:seed )
 else
   say "Database already has data (${CANDIDATE_COUNT} candidates) — skipping seed. Use ./dev.sh seed to reseed."
 fi
@@ -159,8 +161,12 @@ printf "\n"
 say "Everything is up. Open the app:"
 printf "    ${B}Frontend:${X} http://localhost:${WEB_PORT}\n"
 printf "    ${B}Backend :${X} http://localhost:${API_PORT}\n"
-printf "    ${B}Login   :${X} recruiter1@recruitassist.local  /  Recruiter#2026  (admin@recruitassist.local for Settings → Jobs)\n\n"
+printf "    ${B}Login   :${X} recruiter1@recruitassist.local  /  Recruiter#2026  (admin@recruitassist.local for the JD & Résumé tab)\n\n"
 say "Starting backend + frontend… (Ctrl+C to stop; containers keep running — './dev.sh stop' to stop them)"
 printf "\n"
 
-exec $PNPM --parallel --filter @j2w/api --filter @j2w/web dev
+# Backend in the background, frontend in the foreground; Ctrl+C stops both.
+( cd backend && exec $PNPM dev ) &
+BACKEND_PID=$!
+trap 'kill "$BACKEND_PID" 2>/dev/null' INT TERM EXIT
+cd frontend && exec $PNPM dev

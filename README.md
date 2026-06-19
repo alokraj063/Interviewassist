@@ -1,37 +1,64 @@
-# RecruitAssist
+# Interview Assist — Live Call Co-pilot
 
-AI-native applicant tracking system and recruiter productivity platform for
-staffing firms and in-house TA teams. Hinglish-first (Hindi + English) for
-Indian recruiting workflows.
+A recruiter co-pilot for live candidate interviews: it transcribes the call,
+auto-generates a JD + résumé-based question bank, drives the interview one
+question at a time (detecting when you go off-script), scores each answer, and
+saves a final rubric + summary per call. Token + Deepgram audio cost is tracked
+per call.
 
-Forked from `j2w-contact-flow` on 2026-04-29. The contact-center foundation
-(multi-tenant auth, KB with pgvector, Vapi voice agents, live-assist
-transcription pipeline, BullMQ workers) carries over; the domain has been
-rewired around recruiters, candidates, demands, prospects, and submissions.
+## Structure
 
-See [CLAUDE.md](CLAUDE.md) for architecture, deploy, and gotchas.
+Two self-contained folders:
+
+```
+backend/    Fastify API (HTTP + WebSocket) on :8787
+  src/                   routes, ws audio pipeline, interview-flow engine, usage tracking
+  packages/              @j2w/db (pgvector + drizzle), ingest-shared, shared-types, offer-letter-db
+frontend/   Vite + React SPA on :8084
+  src/                   the Live Assist UI (call surface, JD & Résumé, Usage & Cost)
+  packages/shared-types  shared transcript/session types
+docker-compose.yml       Postgres (pgvector) + Redis
+.env                     single shared env file (root)
+dev.sh                   one-command launcher (macOS + Linux)
+```
+
+Each folder is its own pnpm workspace and installs independently.
 
 ## Quick start
 
 ```bash
-pnpm install
-docker compose up -d            # postgres + redis
-pnpm db:migrate
-pnpm --filter @j2w/api db:seed
-pnpm dev                        # web + api + worker in parallel
+./dev.sh           # containers + migrate + seed + backend + frontend
 ```
 
-Web at http://localhost:8080, API at http://localhost:8787.
+Then open **http://localhost:8084** and sign in:
 
-## Layout
+- `recruiter1@recruitassist.local` / `Recruiter#2026` — recruiter
+- `admin@recruitassist.local` / `Recruiter#2026` — admin
 
-- [apps/web](apps/web) — Vite SPA (React + Tailwind + shadcn/ui + React Query)
-- [apps/api](apps/api) — Fastify (HTTP + WebSocket + SSE) on :8787
-- [apps/worker](apps/worker) — BullMQ workers
-- [apps/desktop](apps/desktop) — Electron audio companion (client-distributed)
-- [packages/db](packages/db), [packages/ingest-shared](packages/ingest-shared), [packages/shared-types](packages/shared-types) — workspace libs
-- [deploy/](deploy/) — Dokploy/Traefik docker-compose stack (nginx + api + worker + postgres-pgvector + redis); see [deploy/README.md](deploy/README.md)
+Other commands:
 
-The workspace package scope stays `@j2w/*` (saves ~150 import-rewrites and
-matches the J2W-internal-first product lifecycle); only public-facing
-branding becomes RecruitAssist.
+```bash
+./dev.sh stop      # stop the Postgres + Redis containers
+./dev.sh reset     # stop + delete the db/redis volumes (fresh start)
+./dev.sh seed      # force re-run the demo seed, then start
+```
+
+## Manual (without dev.sh)
+
+```bash
+docker compose up -d                          # postgres + redis
+cd backend  && pnpm install && pnpm db:migrate && pnpm db:seed && pnpm dev
+cd frontend && pnpm install && pnpm dev
+```
+
+## Env
+
+Add your keys to the root `.env` (both folders read it):
+
+```
+DEEPGRAM_API_KEY=...   # live speech-to-text
+OPENAI_API_KEY=...     # the interview co-pilot (plan / questions / scoring)
+```
+
+`DATABASE_URL`, `REDIS_URL`, and `JWT_SECRET` are also required (the defaults in
+`.env` point at the docker containers on ports 5433 / 6380).
