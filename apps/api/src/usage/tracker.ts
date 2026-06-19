@@ -27,6 +27,18 @@ export const PRICING: Record<string, ModelPrice> = {
 
 const DEFAULT_PRICE: ModelPrice = { in: 0.15, out: 0.6 }; // fall back to gpt-4o-mini
 
+// Speech-to-text pricing — USD per MINUTE of streamed audio (billed by time,
+// not tokens). Update with https://deepgram.com/pricing.
+export const AUDIO_PRICING: Record<string, number> = {
+  "nova-3": 0.0077,
+  "nova-2": 0.0043,
+  nova: 0.0043,
+  // Sarvam / Shunya streaming bridges (rough estimates — adjust to your plan).
+  "saaras:v3": 0.006,
+  "shunya-streaming-v1": 0.005,
+};
+const DEFAULT_AUDIO_RATE = 0.0077; // per minute
+
 export function priceFor(model: string): ModelPrice {
   return PRICING[model] ?? DEFAULT_PRICE;
 }
@@ -34,6 +46,35 @@ export function priceFor(model: string): ModelPrice {
 export function costUsd(model: string, promptTokens: number, completionTokens: number): number {
   const p = priceFor(model);
   return (promptTokens * p.in + completionTokens * p.out) / 1_000_000;
+}
+
+export function audioRatePerMin(model: string): number {
+  return AUDIO_PRICING[model] ?? DEFAULT_AUDIO_RATE;
+}
+
+export function audioCostUsd(model: string, seconds: number): number {
+  return (seconds / 60) * audioRatePerMin(model);
+}
+
+/** Record speech-to-text (audio-minute) usage, e.g. a Deepgram session. */
+export async function recordAudioUsage(
+  input: { orgId: string; callId?: string | null; operation: string; model: string; seconds: number },
+  log?: FastifyBaseLogger,
+): Promise<void> {
+  if (!input.seconds || input.seconds <= 0) return;
+  const cost = audioCostUsd(input.model, input.seconds);
+  try {
+    await db.insert(aiUsageEvents).values({
+      orgId: input.orgId,
+      callId: input.callId ?? null,
+      operation: input.operation,
+      model: input.model,
+      audioSeconds: input.seconds.toFixed(2),
+      costUsd: cost.toFixed(8),
+    });
+  } catch (err) {
+    log?.warn({ err, operation: input.operation }, "recordAudioUsage failed");
+  }
 }
 
 export interface UsageInput {
@@ -79,6 +120,7 @@ export async function usageSummary(orgId: string, days = 30) {
       promptTokens: sql<number>`coalesce(sum(${aiUsageEvents.promptTokens}),0)::bigint`,
       completionTokens: sql<number>`coalesce(sum(${aiUsageEvents.completionTokens}),0)::bigint`,
       totalTokens: sql<number>`coalesce(sum(${aiUsageEvents.totalTokens}),0)::bigint`,
+      audioSeconds: sql<number>`coalesce(sum(${aiUsageEvents.audioSeconds}),0)::float8`,
       costUsd: sql<number>`coalesce(sum(${aiUsageEvents.costUsd}),0)::float8`,
     })
     .from(aiUsageEvents)
@@ -89,6 +131,7 @@ export async function usageSummary(orgId: string, days = 30) {
       operation: aiUsageEvents.operation,
       calls: sql<number>`count(*)::int`,
       totalTokens: sql<number>`coalesce(sum(${aiUsageEvents.totalTokens}),0)::bigint`,
+      audioSeconds: sql<number>`coalesce(sum(${aiUsageEvents.audioSeconds}),0)::float8`,
       costUsd: sql<number>`coalesce(sum(${aiUsageEvents.costUsd}),0)::float8`,
     })
     .from(aiUsageEvents)
@@ -101,6 +144,7 @@ export async function usageSummary(orgId: string, days = 30) {
       model: aiUsageEvents.model,
       calls: sql<number>`count(*)::int`,
       totalTokens: sql<number>`coalesce(sum(${aiUsageEvents.totalTokens}),0)::bigint`,
+      audioSeconds: sql<number>`coalesce(sum(${aiUsageEvents.audioSeconds}),0)::float8`,
       costUsd: sql<number>`coalesce(sum(${aiUsageEvents.costUsd}),0)::float8`,
     })
     .from(aiUsageEvents)
@@ -131,6 +175,7 @@ export async function usageSummary(orgId: string, days = 30) {
       demand: demands.title,
       calls: sql<number>`count(*)::int`,
       totalTokens: sql<number>`coalesce(sum(${aiUsageEvents.totalTokens}),0)::bigint`,
+      audioSeconds: sql<number>`coalesce(sum(${aiUsageEvents.audioSeconds}),0)::float8`,
       costUsd: sql<number>`coalesce(sum(${aiUsageEvents.costUsd}),0)::float8`,
       lastAt: sql<string>`max(${aiUsageEvents.createdAt})`,
     })
@@ -150,15 +195,17 @@ export async function usageSummary(orgId: string, days = 30) {
       promptTokens: Number(totals?.promptTokens ?? 0),
       completionTokens: Number(totals?.completionTokens ?? 0),
       totalTokens: Number(totals?.totalTokens ?? 0),
+      audioSeconds: Number(totals?.audioSeconds ?? 0),
       costUsd: Number(totals?.costUsd ?? 0),
     },
-    byOperation: byOperation.map((r) => ({ ...r, totalTokens: Number(r.totalTokens), costUsd: Number(r.costUsd) })),
-    byModel: byModel.map((r) => ({ ...r, totalTokens: Number(r.totalTokens), costUsd: Number(r.costUsd) })),
+    byOperation: byOperation.map((r) => ({ ...r, totalTokens: Number(r.totalTokens), audioSeconds: Number(r.audioSeconds), costUsd: Number(r.costUsd) })),
+    byModel: byModel.map((r) => ({ ...r, totalTokens: Number(r.totalTokens), audioSeconds: Number(r.audioSeconds), costUsd: Number(r.costUsd) })),
     byCall: byCall.map((r) => ({
       callId: r.callId,
       label: [r.candidate, r.demand].filter(Boolean).join(" · ") || (r.callId ? r.callId.slice(0, 8) : "—"),
       calls: Number(r.calls),
       totalTokens: Number(r.totalTokens),
+      audioSeconds: Number(r.audioSeconds),
       costUsd: Number(r.costUsd),
       lastAt: r.lastAt,
     })),

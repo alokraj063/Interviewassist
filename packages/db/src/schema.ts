@@ -4801,6 +4801,9 @@ export const aiUsageEvents = pgTable(
     promptTokens: integer("prompt_tokens").notNull().default(0),
     completionTokens: integer("completion_tokens").notNull().default(0),
     totalTokens: integer("total_tokens").notNull().default(0),
+    // Audio seconds streamed (speech-to-text usage like Deepgram, billed by
+    // minutes not tokens). 0 for token-based LLM rows.
+    audioSeconds: numeric("audio_seconds", { precision: 12, scale: 2 }).notNull().default("0"),
     costUsd: numeric("cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

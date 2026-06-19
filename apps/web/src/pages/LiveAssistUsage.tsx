@@ -3,28 +3,36 @@
 // (plan / next / verify / final / suggestion), aggregated from ai_usage_events.
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ArrowLeft, RefreshCw, Coins, Hash, Activity } from "lucide-react";
+import { ArrowLeft, RefreshCw, Coins, Hash, Activity, Mic } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { useState } from "react";
 
-interface Row { operation?: string; model?: string; calls: number; totalTokens: number; costUsd: number; }
+interface Row { operation?: string; model?: string; calls: number; totalTokens: number; audioSeconds: number; costUsd: number; }
 interface UsageResp {
   ok: boolean;
   days: number;
-  totals: { calls: number; promptTokens: number; completionTokens: number; totalTokens: number; costUsd: number };
+  totals: { calls: number; promptTokens: number; completionTokens: number; totalTokens: number; audioSeconds: number; costUsd: number };
   byOperation: Row[];
   byModel: Row[];
-  byCall: Array<{ callId: string | null; label: string; calls: number; totalTokens: number; costUsd: number; lastAt: string }>;
+  byCall: Array<{ callId: string | null; label: string; calls: number; totalTokens: number; audioSeconds: number; costUsd: number; lastAt: string }>;
   recent: Array<{ operation: string; model: string; callId: string | null; totalTokens: number; costUsd: number; createdAt: string }>;
   pricing: Record<string, { in: number; out: number }>;
 }
 
 const OP_LABEL: Record<string, string> = {
   plan: "Question plan", next: "Next question", verify: "Answer check",
-  final: "Final score", suggestion: "Live suggestions", embedding: "Embeddings",
+  final: "Final score", suggestion: "Live suggestions", detect: "Question detect",
+  embedding: "Embeddings", deepgram: "Deepgram STT (audio)", sarvam: "Sarvam STT (audio)",
+  shunya: "Shunya STT (audio)",
 };
 const usd = (n: number) => `$${n < 0.01 ? n.toFixed(5) : n.toFixed(4)}`;
 const num = (n: number) => n.toLocaleString();
+const mins = (sec: number) => `${(sec / 60).toFixed(1)}m`;
+// Show tokens for LLM rows, audio minutes for STT rows.
+const usageCell = (tokens: number, audioSeconds: number) => (audioSeconds > 0 ? mins(audioSeconds) : num(tokens));
+// A call has BOTH LLM tokens and audio — show both.
+const comboCell = (tokens: number, audioSeconds: number) =>
+  [tokens > 0 ? num(tokens) : "", audioSeconds > 0 ? mins(audioSeconds) : ""].filter(Boolean).join(" · ") || "0";
 
 export default function LiveAssistUsage() {
   const [days, setDays] = useState(30);
@@ -61,30 +69,31 @@ export default function LiveAssistUsage() {
       ) : (
         <>
           {/* Totals */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
             <Stat icon={Coins} label="Total cost" value={usd(data.totals.costUsd)} sub={`${data.totals.calls} AI calls`} />
-            <Stat icon={Hash} label="Total tokens" value={num(data.totals.totalTokens)} sub={`${num(data.totals.promptTokens)} in · ${num(data.totals.completionTokens)} out`} />
-            <Stat icon={Activity} label="Avg cost / call" value={usd(data.totals.calls ? data.totals.costUsd / data.totals.calls : 0)} sub={`over ${data.days} days`} />
+            <Stat icon={Hash} label="LLM tokens" value={num(data.totals.totalTokens)} sub={`${num(data.totals.promptTokens)} in · ${num(data.totals.completionTokens)} out`} />
+            <Stat icon={Mic} label="Audio (Deepgram)" value={mins(data.totals.audioSeconds)} sub="speech-to-text" />
+            <Stat icon={Activity} label="Avg / call" value={usd(data.totals.calls ? data.totals.costUsd / data.totals.calls : 0)} sub={`over ${data.days} days`} />
           </div>
 
           {/* By call — the headline call-wise cost breakdown */}
           <Card title="Cost per call">
-            <Table headers={["Call (candidate · JD)", "AI calls", "Tokens", "Cost"]} rows={data.byCall.map((r) => [
-              r.label, num(r.calls), num(r.totalTokens), usd(r.costUsd),
+            <Table headers={["Call (candidate · JD)", "AI calls", "Tokens / audio", "Cost"]} rows={data.byCall.map((r) => [
+              r.label, num(r.calls), comboCell(r.totalTokens, r.audioSeconds), usd(r.costUsd),
             ])} empty="No calls yet — start an interview." />
           </Card>
 
           {/* By operation */}
           <Card title="By operation">
-            <Table headers={["Operation", "Calls", "Tokens", "Cost"]} rows={data.byOperation.map((r) => [
-              OP_LABEL[r.operation ?? ""] ?? r.operation ?? "—", num(r.calls), num(r.totalTokens), usd(r.costUsd),
+            <Table headers={["Operation", "Calls", "Tokens / audio", "Cost"]} rows={data.byOperation.map((r) => [
+              OP_LABEL[r.operation ?? ""] ?? r.operation ?? "—", num(r.calls), usageCell(r.totalTokens, r.audioSeconds), usd(r.costUsd),
             ])} empty="No usage yet — run a call." />
           </Card>
 
           {/* By model */}
           <Card title="By model">
-            <Table headers={["Model", "Calls", "Tokens", "Cost"]} rows={data.byModel.map((r) => [
-              r.model ?? "—", num(r.calls), num(r.totalTokens), usd(r.costUsd),
+            <Table headers={["Model", "Calls", "Tokens / audio", "Cost"]} rows={data.byModel.map((r) => [
+              r.model ?? "—", num(r.calls), usageCell(r.totalTokens, r.audioSeconds), usd(r.costUsd),
             ])} empty="—" />
           </Card>
 
@@ -98,8 +107,8 @@ export default function LiveAssistUsage() {
           </Card>
 
           <p className="text-[11px] text-muted-foreground">
-            Cost is estimated from OpenAI list pricing per 1M tokens (e.g. gpt-4o-mini ${data.pricing["gpt-4o-mini"]?.in}/in · ${data.pricing["gpt-4o-mini"]?.out}/out).
-            Deepgram speech-to-text is billed separately by audio minutes and isn't token-based, so it's not shown here.
+            LLM cost is estimated from OpenAI list pricing per 1M tokens (e.g. gpt-4o-mini ${data.pricing["gpt-4o-mini"]?.in}/in · ${data.pricing["gpt-4o-mini"]?.out}/out).
+            Deepgram speech-to-text is billed by audio minutes (~$0.0077/min for nova-3) and is now included — shown as audio minutes rather than tokens.
           </p>
         </>
       )}

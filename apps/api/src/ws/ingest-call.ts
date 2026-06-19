@@ -37,6 +37,7 @@ import {
 } from "../transcription/single-bridge.js";
 import type { TranscriptionLanguage } from "../transcription/provider.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
+import { recordAudioUsage } from "../usage/tracker.js";
 import { WavDumper } from "./wav-dump.js";
 
 const DUMP_WAVS = process.env.DUMP_WAVS !== "0"; // default ON for the wedge — needed for post_diarize.
@@ -145,6 +146,17 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
         { callId, durationMs, bytesSent: state.bytesSent, dumpDir: DUMP_WAVS ? DUMP_DIR : null },
         "ingest-call session closed",
       );
+
+      // Record speech-to-text usage by audio seconds (PCM16 16kHz mono =
+      // 32000 bytes/s). Deepgram/Sarvam/Shunya are billed per audio minute,
+      // so this feeds the Usage tab alongside the LLM token costs.
+      const audioSeconds = state.bytesSent / 32000;
+      if (row.orgId && audioSeconds > 0) {
+        void recordAudioUsage(
+          { orgId: row.orgId, callId, operation: provider, model: model ?? "nova-3", seconds: audioSeconds },
+          app.log,
+        );
+      }
 
       // Persist recording_url + enqueue acoustic-sentiment job (single mixed
       // source — see notes in workers/jobs/acousticSentiment.ts). We store a
