@@ -7,7 +7,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { UserPlus, Briefcase, Check, Loader2, ArrowLeft, Globe, Upload } from "lucide-react";
+import { UserPlus, Briefcase, Check, Loader2, ArrowLeft, Globe, Upload, Building2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { useCan } from "@/auth/AuthContext";
 import { useDemands } from "@/hooks/useDemands";
@@ -19,17 +19,30 @@ import { toast } from "sonner";
 export default function LiveAssistSettings() {
   const canCreateDemand = useCan("demands.write");
   const canCreateCandidate = useCan("candidates.write");
+  const canCreateClient = useCan("clients.write");
+  const canReadClients = useCan("clients.read");
   const qc = useQueryClient();
   const { data: demands = [] } = useDemands({});
 
-  // Distinct clients derived from existing demands (no clients list endpoint).
-  const clients = useMemo(() => {
+  // Real clients list (so newly-created clients show up immediately and the
+  // picker works even before any demand exists).
+  const { data: clientsData } = useQuery<{ clients: Array<{ id: string; name: string }> }>({
+    queryKey: ["clients", "all"],
+    queryFn: () => apiFetch("/api/clients"),
+    enabled: canReadClients,
+  });
+
+  // Fallback for accounts without clients.read: derive distinct clients from
+  // the demands the user can already see.
+  const demandClients = useMemo(() => {
     const seen = new Map<string, string>();
     for (const d of demands) {
       if (d.clientId && !seen.has(d.clientId)) seen.set(d.clientId, d.clientName ?? "Client");
     }
     return Array.from(seen, ([id, name]) => ({ id, name }));
   }, [demands]);
+
+  const clients = clientsData?.clients ?? demandClients;
 
   const [tab, setTab] = useState<"jd" | "resume">("jd");
   const [resumeModal, setResumeModal] = useState(false);
@@ -73,11 +86,17 @@ export default function LiveAssistSettings() {
       </div>
 
       {tab === "jd" && (
-        <AddJobCard
-          disabled={!canCreateDemand}
-          clients={clients}
-          onCreated={() => qc.invalidateQueries({ queryKey: ["demands"] })}
-        />
+        <div className="space-y-3">
+          <AddClientCard
+            disabled={!canCreateClient}
+            onCreated={() => qc.invalidateQueries({ queryKey: ["clients"] })}
+          />
+          <AddJobCard
+            disabled={!canCreateDemand}
+            clients={clients}
+            onCreated={() => qc.invalidateQueries({ queryKey: ["demands"] })}
+          />
+        </div>
       )}
 
       {tab === "resume" && (
@@ -123,6 +142,56 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
       <div className="mt-0.5">{children}</div>
     </label>
+  );
+}
+
+function AddClientCard({ disabled, onCreated }: { disabled: boolean; onCreated: () => void }) {
+  const [f, setF] = useState({ companyName: "", industry: "", tier: "" });
+  const [busy, setBusy] = useState(false);
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  async function submit() {
+    if (f.companyName.trim().length < 2) { toast.error("Company name is required."); return; }
+    setBusy(true);
+    try {
+      await apiFetch("/api/clients", {
+        method: "POST",
+        json: {
+          companyName: f.companyName.trim(),
+          industry: f.industry.trim() || undefined,
+          tier: f.tier.trim() || undefined,
+        },
+      });
+      toast.success(`Client "${f.companyName.trim()}" added`);
+      setF({ companyName: "", industry: "", tier: "" });
+      onCreated();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Could not create client";
+      toast.error(/409/.test(msg) ? "A client with that name already exists." : msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section icon={Building2} title="Add client" subtitle="The company you're hiring for. Becomes selectable when adding a job below.">
+      {disabled ? (
+        <p className="text-xs text-muted-foreground">
+          Your account can't create clients (needs the <code>clients.write</code> permission).
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Company name *"><Input value={f.companyName} onChange={set("companyName")} placeholder="Acme Corp GCC India" /></Field>
+            <Field label="Industry"><Input value={f.industry} onChange={set("industry")} placeholder="IT Services" /></Field>
+            <Field label="Tier"><Input value={f.tier} onChange={set("tier")} placeholder="A / B / C" /></Field>
+          </div>
+          <Button onClick={submit} disabled={busy} size="sm">
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Add client
+          </Button>
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -307,7 +376,7 @@ function AddJobCard({ disabled, clients, onCreated }: { disabled: boolean; clien
               {banks.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </Field>
-          {clients.length === 0 && <p className="text-xs text-amber-600">No clients found yet — clients come from existing demands. Seed data includes some.</p>}
+          {clients.length === 0 && <p className="text-xs text-amber-600">No clients yet — add one in the "Add client" card above first.</p>}
           <Button onClick={submit} disabled={busy} size="sm">
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Add job
           </Button>

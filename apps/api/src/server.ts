@@ -17,6 +17,7 @@ import { platformRoutes } from "./routes/platform.js";
 import { rolesRoutes } from "./routes/roles.js";
 import { candidatesRoutes } from "./routes/candidates.js";
 import { demandsRoutes } from "./routes/demands.js";
+import { clientsRoutes } from "./routes/clients.js";
 import { prospectsRoutes } from "./routes/prospects.js";
 import { teamsRoutes } from "./routes/teams.js";
 import { usersRoutes } from "./routes/users.js";
@@ -152,6 +153,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(assistRoutes, { prefix: "/api/assist" });
   await app.register(candidatesRoutes, { prefix: "/api/candidates" });
   await app.register(demandsRoutes, { prefix: "/api/demands" });
+  await app.register(clientsRoutes, { prefix: "/api/clients" });
   await app.register(prospectsRoutes, { prefix: "/api/prospects" });
   await app.register(usersRoutes, { prefix: "/api/users" });
   await app.register(teamsRoutes, { prefix: "/api/teams" });
