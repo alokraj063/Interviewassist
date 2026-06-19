@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Avatar } from "@/components/ui-kit";
-import { HandoffToastBridge } from "@/components/triage/HandoffToastBridge";
 import { useAuth, useCan } from "@/auth/AuthContext";
 import { NOTIFICATIONS, formatRelative } from "@/data/store";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
@@ -131,8 +130,6 @@ export default function AppShell() {
 
   return (
     <div className="h-screen flex bg-background text-foreground overflow-hidden">
-      {/* Global triage handoff toast — listens on /ws/agent. */}
-      <HandoffToastBridge />
       {/* Sidebar */}
       <aside className={cn("border-r border-sidebar-border bg-sidebar flex flex-col shrink-0 transition-[width] duration-150", collapsed ? "w-[60px]" : "w-[224px]")}>
         <div className={cn("h-14 flex items-center border-b border-sidebar-border px-3", collapsed ? "justify-center" : "justify-between")}>
