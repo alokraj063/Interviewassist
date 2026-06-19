@@ -20,11 +20,9 @@
 //   - Close the Deepgram session
 
 import path from "node:path";
-import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
-import { callSessions, db } from "@j2w/db";
-import { getAcousticSentimentQueue } from "@j2w/ingest-shared";
+import { collections } from "../mongo.js";
 import {
   closeSingleStream,
   ensureSingleStream,
@@ -73,18 +71,10 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
     }
 
     // Look up the call so we know which org + STT provider to use.
-    const [row] = await db
-      .select({
-        id: callSessions.id,
-        orgId: callSessions.orgId,
-        recruiterUserId: callSessions.recruiterUserId,
-        mode: callSessions.mode,
-        transcriberProvider: callSessions.transcriberProvider,
-        transcriberModel: callSessions.transcriberModel,
-        transcriberLanguage: callSessions.transcriberLanguage,
-      })
-      .from(callSessions)
-      .where(eq(callSessions.id, callId));
+    const row = await collections.callSessions().findOne<{
+      id: string; orgId: string; recruiterUserId: string | null; mode: string;
+      transcriberProvider: string | null; transcriberModel: string | null; transcriberLanguage: string | null;
+    }>({ id: callId });
     if (!row || !row.orgId) return socket.close(4404, "call_not_found");
     // Permission: the recruiter who owns the call is the only one who can
     // pump audio into it. (Future: allow QA/lead listen-in via a different
@@ -167,21 +157,12 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
       const recruiterRel = dumper?.relativePaths.recruiter ?? null;
       if (recruiterRel) {
         try {
-          await db
-            .update(callSessions)
-            .set({
-              recordingUrl: recruiterRel,
-              recordingDurationMs: durationMs,
-              recordingMime: "audio/wav",
-            })
-            .where(eq(callSessions.id, callId));
-          await getAcousticSentimentQueue().add(
-            `acoustic-${callId}`,
-            { callId, recordingUrl: recruiterRel, recordingMime: "audio/wav" },
-            { jobId: `acoustic-${callId}` },
+          await collections.callSessions().updateOne(
+            { id: callId },
+            { $set: { recordingUrl: recruiterRel, recordingDurationMs: durationMs, recordingMime: "audio/wav" } },
           );
         } catch (err) {
-          app.log.warn({ err, callId }, "post-call enqueue failed");
+          app.log.warn({ err, callId }, "post-call recording persist failed");
         }
       }
     });

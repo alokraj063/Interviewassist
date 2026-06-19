@@ -15,8 +15,12 @@ const schema = z.object({
   API_PUBLIC_URL: z.string().url().default("http://localhost:8787"),
   APP_BASE_URL: z.string().url().default("http://localhost:5173"),
   JWT_SECRET: z.string().min(32),
-  DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string().url().default("redis://localhost:6379"),
+  // MongoDB is the datastore (replaced Postgres). Local default.
+  MONGO_URL: z.string().default("mongodb://localhost:27017"),
+  MONGO_DB: z.string().default("interview_assist"),
+  // Legacy — no longer used (kept optional so old .env files don't break).
+  DATABASE_URL: z.string().optional(),
+  REDIS_URL: z.string().optional(),
   DEEPGRAM_API_KEY: z.string().optional(),
   // Sarvam AI streaming STT (https://docs.sarvam.ai/api-reference-docs/...).
   // Passed as `api-subscription-key` on the upstream WS connect.

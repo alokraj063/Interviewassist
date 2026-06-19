@@ -17,16 +17,9 @@
 // Everything the co-pilot emits is in ENGLISH by design (recruiter-facing),
 // regardless of the language the candidate speaks on the call.
 import OpenAI from "openai";
-import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import {
-  callSessions,
-  candidates as candidatesTable,
-  clients as clientsTable,
-  db,
-  demands as demandsTable,
-} from "@j2w/db";
+import { collections } from "../mongo.js";
 import { chatModel, env } from "../env.js";
 import { recordUsage, usageSummary } from "../usage/tracker.js";
 
@@ -75,39 +68,21 @@ async function loadJdResume(
   callId: string,
   orgId: string,
 ): Promise<{ jd: string; resume: string; candidateName: string } | null> {
-  const [call] = await db
-    .select({
-      orgId: callSessions.orgId,
-      demandId: callSessions.demandId,
-      candidateId: callSessions.candidateId,
-    })
-    .from(callSessions)
-    .where(eq(callSessions.id, callId));
+  const call = await collections.callSessions().findOne<{ orgId: string; demandId: string | null; candidateId: string | null }>({ id: callId });
   if (!call || call.orgId !== orgId) return null;
 
   let jd = "";
   if (call.demandId) {
-    const [d] = await db
-      .select({
-        title: demandsTable.title,
-        designation: demandsTable.designation,
-        description: demandsTable.description,
-        responsibilities: demandsTable.responsibilities,
-        experienceMinYears: demandsTable.experienceMinYears,
-        experienceMaxYears: demandsTable.experienceMaxYears,
-        primaryLocation: demandsTable.primaryLocation,
-        clientId: demandsTable.clientId,
-      })
-      .from(demandsTable)
-      .where(eq(demandsTable.id, call.demandId));
+    const d = await collections.demands().findOne<{
+      title: string | null; designation: string | null; description: string | null;
+      responsibilities: string | null; experienceMinYears: string | null;
+      experienceMaxYears: string | null; primaryLocation: string | null; clientId: string | null;
+    }>({ id: call.demandId });
     if (d) {
       let client: string | null = null;
       if (d.clientId) {
-        const [c] = await db
-          .select({ name: clientsTable.companyName })
-          .from(clientsTable)
-          .where(eq(clientsTable.id, d.clientId));
-        client = c?.name ?? null;
+        const c = await collections.clients().findOne<{ companyName: string }>({ id: d.clientId });
+        client = c?.companyName ?? null;
       }
       const exp = [d.experienceMinYears, d.experienceMaxYears].filter(Boolean).join("–");
       jd = [
@@ -127,19 +102,11 @@ async function loadJdResume(
   let resume = "";
   let candidateName = "";
   if (call.candidateId) {
-    const [k] = await db
-      .select({
-        displayName: candidatesTable.displayName,
-        currentTitle: candidatesTable.currentTitle,
-        currentCompany: candidatesTable.currentCompany,
-        totalExperienceYears: candidatesTable.totalExperienceYears,
-        currentLocation: candidatesTable.currentLocation,
-        currentCtcLakhs: candidatesTable.currentCtcLakhs,
-        expectedCtcLakhs: candidatesTable.expectedCtcLakhs,
-        noticePeriodDays: candidatesTable.noticePeriodDays,
-      })
-      .from(candidatesTable)
-      .where(eq(candidatesTable.id, call.candidateId));
+    const k = await collections.candidates().findOne<{
+      displayName: string | null; currentTitle: string | null; currentCompany: string | null;
+      totalExperienceYears: string | null; currentLocation: string | null;
+      currentCtcLakhs: string | null; expectedCtcLakhs: string | null; noticePeriodDays: number | null;
+    }>({ id: call.candidateId });
     if (k) {
       candidateName = k.displayName ?? "";
       resume = [
@@ -414,10 +381,10 @@ export async function assistRoutes(app: FastifyInstance) {
 
     // Save the score + summary + rubric on the call row (jsonb `summary`).
     try {
-      await db
-        .update(callSessions)
-        .set({ summary: evaluation, endedAt: new Date(), status: "ended" })
-        .where(eq(callSessions.id, body.data.callId));
+      await collections.callSessions().updateOne(
+        { id: body.data.callId },
+        { $set: { summary: evaluation, endedAt: new Date(), status: "ended" } },
+      );
     } catch (err) {
       req.log.warn({ err, callId: body.data.callId }, "failed to persist interview evaluation");
     }
@@ -427,10 +394,7 @@ export async function assistRoutes(app: FastifyInstance) {
 
   // Fetch a saved evaluation (score + summary + rubric + Q&A) for a call.
   app.get<{ Params: { callId: string } }>("/:callId/evaluation", async (req, reply) => {
-    const [call] = await db
-      .select({ orgId: callSessions.orgId, summary: callSessions.summary })
-      .from(callSessions)
-      .where(eq(callSessions.id, req.params.callId));
+    const call = await collections.callSessions().findOne<{ orgId: string; summary: unknown }>({ id: req.params.callId });
     if (!call || call.orgId !== req.authUser!.orgId) return reply.code(404).send({ error: "not_found" });
     const evalData = call.summary as { kind?: string } | null;
     if (!evalData || evalData.kind !== "interview_eval") return { ok: true, evaluation: null };

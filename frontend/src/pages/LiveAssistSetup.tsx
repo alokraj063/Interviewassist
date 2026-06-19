@@ -54,7 +54,6 @@ import { cn } from "@/lib/utils";
 import { TranscriptPanel } from "@/components/live/TranscriptPanel";
 import { CandidateContext } from "@/components/live/CandidateContext";
 import { SentimentCard } from "@/components/live-assist/SentimentCard";
-import { KnowledgeCard } from "@/components/live-assist/KnowledgeCard";
 import { RightPanelTabs } from "@/components/live-assist/RightPanelTabs";
 import { InterviewFlowPanel } from "@/components/live-assist/InterviewFlowPanel";
 import { useInterviewFlow, type FlowTurn } from "@/hooks/useInterviewFlow";
@@ -166,7 +165,6 @@ export default function LiveAssistSetup() {
   const sourcePartial = demoActive ? demoRunner.state.partial : wedge.state.partial;
   const sourceSentiment = demoActive ? demoRunner.state.sentiment : wedge.state.sentiment;
   const sourceSentimentSeries = demoActive ? demoRunner.state.sentimentSeries : wedge.state.sentimentSeries;
-  const sourceCitations = demoActive ? demoRunner.state.citations : wedge.state.citations;
   const sourceLiveRubric = demoActive ? demoRunner.state.liveRubric : wedge.state.liveRubric;
   const sourceCallId = demoActive ? demoRunner.state.callId : wedge.state.callId;
 
@@ -355,10 +353,7 @@ export default function LiveAssistSetup() {
               onEnd={flow.endNow}
             />
           </div>
-          <div className="col-span-12 xl:col-span-5 row-span-4 min-h-0">
-            <KnowledgeCard citations={sourceCitations} limit={10} />
-          </div>
-          <div className="col-span-12 xl:col-span-5 row-span-3 min-h-0">
+          <div className="col-span-12 xl:col-span-5 row-span-7 min-h-0">
             <SentimentCard
               series={sentimentSeries}
               current={sentimentCurrent}

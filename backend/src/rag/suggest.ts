@@ -1,15 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import OpenAI from "openai";
-import {
-  callSessions,
-  candidates as candidatesTable,
-  clients as clientsTable,
-  db,
-  demands as demandsTable,
-  suggestions,
-  transcriptTurns,
-} from "@j2w/db";
+import { collections } from "../mongo.js";
 import type {
   Citation,
   Speaker,
@@ -26,12 +17,10 @@ const orgIdCache = new Map<string, string>();
 async function orgIdForCall(callId: string): Promise<string | null> {
   const hit = orgIdCache.get(callId);
   if (hit) return hit;
-  const [row] = await db.select({ orgId: callSessions.orgId }).from(callSessions).where(eq(callSessions.id, callId)).limit(1);
+  const row = await collections.callSessions().findOne<{ orgId: string }>({ id: callId });
   if (row?.orgId) orgIdCache.set(callId, row.orgId);
   return row?.orgId ?? null;
 }
-import { recordRetrieval } from "../routes/kb.js";
-import { retrieve } from "./retrieve.js";
 
 // System prompt kept intentionally >1024 tokens so OpenAI prompt caching can
 // kick in across rapid successive suggestions in the same call session.
@@ -293,18 +282,9 @@ export async function maybeSuggest(
       return;
     }
 
-    // Retrieve grounding chunks for the last customer utterance.
-    let citations: Citation[] = [];
-    const retrT0 = Date.now();
-    try {
-      citations = await retrieve(last.text, { limit: 6 });
-    } catch (err) {
-      log.warn({ err, callId }, "rag retrieve failed");
-    }
-    // Telemetry: one kb_retrieval_events row per served chunk (or a single
-    // zero-result row) so KB analytics / content-gaps / retrievals7d MOVE when
-    // a live call actually retrieves. Best-effort; never breaks the suggestion.
-    void recordCallRetrieval(callId, last.text, citations, Date.now() - retrT0, log);
+    // KB vector retrieval removed — the interview co-pilot grounds purely in
+    // the JD + candidate + transcript, no embeddings/vector store.
+    const citations: Citation[] = [];
 
     broadcastToCall(callId, {
       type: "suggestion.begin",
@@ -433,13 +413,15 @@ export async function maybeSuggest(
     });
 
     try {
-      await db.insert(suggestions).values({
+      await collections.suggestions().insertOne({
+        id: randomUUID(),
         callId,
         triggerTurnId: triggerTurnId ?? null,
         kind: "live",
         content: payload,
         citations: payload.citations,
         latencyMs,
+        createdAt: new Date(),
       });
     } catch (err) {
       log.warn({ err, callId }, "persist suggestion failed");
@@ -536,114 +518,50 @@ function formatRecruiterContext(c: RecruiterCallContext): string {
   return lines.join("\n");
 }
 
-// Resolve the call's org and write retrieval telemetry for the `suggest`
-// surface. Fully isolated/best-effort — any failure is swallowed.
-async function recordCallRetrieval(
-  callId: string,
-  query: string,
-  citations: Citation[],
-  latencyMs: number,
-  log: FastifyBaseLogger,
-): Promise<void> {
-  try {
-    const [session] = await db
-      .select({ orgId: callSessions.orgId })
-      .from(callSessions)
-      .where(eq(callSessions.id, callId))
-      .limit(1);
-    if (!session?.orgId) return;
-    await recordRetrieval(
-      session.orgId,
-      "suggest",
-      query,
-      citations.map((c) => ({
-        sourceId: c.sourceId,
-        documentId: c.documentId,
-        chunkId: typeof c.chunkId === "number" ? c.chunkId : undefined,
-        score: c.score,
-      })),
-      latencyMs,
-      callId,
-    );
-  } catch (err) {
-    log.warn({ err, callId }, "kb retrieval telemetry failed");
-  }
-}
-
 async function loadRecruiterContext(callId: string): Promise<RecruiterCallContext> {
-  const [session] = await db
-    .select({
-      demandId: callSessions.demandId,
-      candidateId: callSessions.candidateId,
-      language: callSessions.transcriberLanguage,
-    })
-    .from(callSessions)
-    .where(eq(callSessions.id, callId))
-    .limit(1);
+  const session = await collections.callSessions().findOne<{
+    demandId: string | null; candidateId: string | null; transcriberLanguage: string | null;
+  }>({ id: callId });
 
   const ctx: RecruiterCallContext = {
     callId,
-    language: session?.language ?? "multi",
+    language: session?.transcriberLanguage ?? "multi",
     demand: null,
     candidate: null,
   };
   if (session?.demandId) {
-    const [d] = await db
-      .select({
-        title: demandsTable.title,
-        designation: demandsTable.designation,
-        salaryFromLakhs: demandsTable.salaryFrom,
-        salaryToLakhs: demandsTable.salaryTo,
-        experienceMinYears: demandsTable.experienceMinYears,
-        experienceMaxYears: demandsTable.experienceMaxYears,
-        primaryLocation: demandsTable.primaryLocation,
-        probingDetails: demandsTable.probingDetails,
-        isVip: demandsTable.isVip,
-        clientId: demandsTable.clientId,
-      })
-      .from(demandsTable)
-      .where(eq(demandsTable.id, session.demandId))
-      .limit(1);
+    const d = await collections.demands().findOne<{
+      title: string | null; designation: string | null; salaryFrom: string | null; salaryTo: string | null;
+      experienceMinYears: string | null; experienceMaxYears: string | null; primaryLocation: string | null;
+      probingDetails: { workMode?: string } | null; isVip: boolean; clientId: string | null;
+    }>({ id: session.demandId });
     if (d) {
       let customer: string | null = null;
       if (d.clientId) {
-        const [c] = await db
-          .select({ name: clientsTable.companyName })
-          .from(clientsTable)
-          .where(eq(clientsTable.id, d.clientId))
-          .limit(1);
-        customer = c?.name ?? null;
+        const c = await collections.clients().findOne<{ companyName: string }>({ id: d.clientId });
+        customer = c?.companyName ?? null;
       }
       ctx.demand = {
-        title: d.title,
-        designation: d.designation,
-        salaryFromLakhs: d.salaryFromLakhs,
-        salaryToLakhs: d.salaryToLakhs,
-        experienceMinYears: d.experienceMinYears,
-        experienceMaxYears: d.experienceMaxYears,
+        title: d.title, designation: d.designation,
+        salaryFromLakhs: d.salaryFrom, salaryToLakhs: d.salaryTo,
+        experienceMinYears: d.experienceMinYears, experienceMaxYears: d.experienceMaxYears,
         primaryLocation: d.primaryLocation,
-        workMode: (d.probingDetails as { workMode?: string } | null)?.workMode ?? null,
-        isVip: d.isVip,
-        customer,
+        workMode: d.probingDetails?.workMode ?? null,
+        isVip: !!d.isVip, customer,
       };
     }
   }
   if (session?.candidateId) {
-    const [k] = await db
-      .select({
-        displayName: candidatesTable.displayName,
-        currentCompany: candidatesTable.currentCompany,
-        currentTitle: candidatesTable.currentTitle,
-        totalExperienceYears: candidatesTable.totalExperienceYears,
-        currentCtcLakhs: candidatesTable.currentCtcLakhs,
-        expectedCtcLakhs: candidatesTable.expectedCtcLakhs,
-        noticePeriodDays: candidatesTable.noticePeriodDays,
-        currentLocation: candidatesTable.currentLocation,
-      })
-      .from(candidatesTable)
-      .where(eq(candidatesTable.id, session.candidateId))
-      .limit(1);
-    if (k) ctx.candidate = k;
+    const k = await collections.candidates().findOne<{
+      displayName: string | null; currentCompany: string | null; currentTitle: string | null;
+      totalExperienceYears: string | null; currentCtcLakhs: string | null; expectedCtcLakhs: string | null;
+      noticePeriodDays: number | null; currentLocation: string | null;
+    }>({ id: session.candidateId });
+    if (k) ctx.candidate = {
+      displayName: k.displayName, currentCompany: k.currentCompany, currentTitle: k.currentTitle,
+      totalExperienceYears: k.totalExperienceYears, currentCtcLakhs: k.currentCtcLakhs,
+      expectedCtcLakhs: k.expectedCtcLakhs, noticePeriodDays: k.noticePeriodDays, currentLocation: k.currentLocation,
+    };
   }
   return ctx;
 }
@@ -666,7 +584,7 @@ async function relabelLastSpeaker(
   last.speaker = role; // keep the in-memory ring buffer consistent for next pass
   broadcastToCall(callId, { type: "transcript.relabel", turnId: last.id, speaker: role });
   try {
-    await db.update(transcriptTurns).set({ speaker: role }).where(eq(transcriptTurns.id, last.id));
+    await collections.transcriptTurns().updateOne({ id: last.id }, { $set: { speaker: role } });
   } catch (err) {
     log.warn({ err, callId, turnId: last.id }, "speaker relabel persist failed");
   }

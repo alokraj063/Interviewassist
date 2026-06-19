@@ -16,9 +16,9 @@
 // experience across providers.
 import type { FastifyInstance, FastifyBaseLogger } from "fastify";
 import type { WebSocket as WsSocket } from "ws";
-import { eq } from "drizzle-orm";
 import type { Speaker, TranscriptTurn } from "@j2w/shared-types";
-import { callSessions, db, transcriptTurns } from "@j2w/db";
+import { randomUUID } from "node:crypto";
+import { collections } from "../mongo.js";
 import { env } from "../env.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
 import { createSarvamBridge } from "../transcription/sarvam.js";
@@ -71,10 +71,7 @@ async function resolveProviderApiKey(
 ): Promise<string | null> {
   let orgId: string | null = null;
   if (callId) {
-    const [row] = await db
-      .select({ orgId: callSessions.orgId })
-      .from(callSessions)
-      .where(eq(callSessions.id, callId));
+    const row = await collections.callSessions().findOne<{ orgId: string }>({ id: callId });
     orgId = row?.orgId ?? null;
   }
   if (orgId) {
@@ -164,18 +161,11 @@ export async function registerCustomTranscriberWs(app: FastifyInstance): Promise
     async function onFinal(turn: TranscriptTurn): Promise<void> {
       if (!callId) return;
       try {
-        const [row] = await db
-          .insert(transcriptTurns)
-          .values({
-            callId,
-            speaker: turn.speaker,
-            text: turn.text,
-            isFinal: true,
-            tsStartMs: turn.tsStartMs,
-            tsEndMs: turn.tsEndMs,
-          })
-          .returning();
-        turn.id = row.id;
+        turn.id = Date.now();
+        await collections.transcriptTurns().insertOne({
+          docId: randomUUID(), id: turn.id, callId, speaker: turn.speaker, text: turn.text,
+          isFinal: true, tsStartMs: turn.tsStartMs, tsEndMs: turn.tsEndMs, sentiment: null, createdAt: new Date(),
+        });
       } catch (err) {
         app.log.error({ err, callId }, "failed to persist custom-transcriber turn");
       }

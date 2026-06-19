@@ -1,12 +1,16 @@
-import { db, memberships, organizations, rolePermissions, type Role, users } from "@j2w/db";
-import { and, eq } from "drizzle-orm";
+import { collections } from "../mongo.js";
 
-/**
- * Sentinel orgId for platform admins. Distinct from DEFAULT_ORG_ID so that
- * tenant-route queries filtering by the platform admin's orgId match no real
- * data (defensive against leaks). Real /platform routes ignore the orgId and
- * gate on `isPlatformAdmin` instead.
- */
+export type Role =
+  | "recruiter"
+  | "delivery_lead"
+  | "account_manager"
+  | "business_head"
+  | "qa_reviewer"
+  | "admin"
+  | "client_user"
+  | "proctor";
+
+/** Sentinel orgId for platform admins (matches no real tenant data). */
 export const PLATFORM_ORG_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
 export interface AuthUser {
@@ -21,34 +25,25 @@ export interface AuthUser {
   mfaEnrolledAt: Date | null;
   suspendedAt: Date | null;
   permissions: string[];
-  /**
-   * Super-admin flag. When true, orgId is the PLATFORM_ORG_ID sentinel and
-   * `permissions` is empty — the user must be routed through /api/platform/*
-   * via the requirePlatformAdmin middleware to do anything. Tenant routes
-   * filtering by `req.authUser.orgId` will therefore see no data.
-   */
   isPlatformAdmin: boolean;
 }
 
-/**
- * Fetch the user + their active membership + cached role permissions.
- * Returns null if the user is missing, the membership is missing, or either
- * is suspended.
- *
- * Platform admins (`users.is_platform_admin = true`) have no membership; they
- * get a sentinel AuthUser with `orgId = PLATFORM_ORG_ID` and an empty
- * permissions array. Tenant routes don't have to special-case them — queries
- * scoped to that sentinel id return nothing. Platform routes gate on
- * `isPlatformAdmin` via `requirePlatformAdmin`.
- *
- * For now a user has exactly one active membership (single workspace); this
- * shape leaves room to choose an active org later without API changes.
- */
+interface UserDoc {
+  id: string;
+  email: string;
+  name: string | null;
+  suspendedAt: Date | null;
+  isPlatformAdmin?: boolean;
+  emailVerifiedAt: Date | null;
+  mfaEnrolledAt: Date | null;
+}
+interface MembershipDoc { userId: string; orgId: string; role: Role; status: "invited" | "active" | "suspended"; }
+
+/** Fetch the user + their active membership + cached role permissions (Mongo). */
 export async function loadAuthUser(userId: string, orgId?: string): Promise<AuthUser | null> {
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
+  const user = await collections.users().findOne<UserDoc>({ id: userId });
   if (!user || user.suspendedAt) return null;
 
-  // Platform admins skip the membership check entirely.
   if (user.isPlatformAdmin) {
     return {
       id: user.id,
@@ -66,21 +61,18 @@ export async function loadAuthUser(userId: string, orgId?: string): Promise<Auth
     };
   }
 
-  const [member] = orgId
-    ? await db
-        .select()
-        .from(memberships)
-        .where(and(eq(memberships.userId, userId), eq(memberships.orgId, orgId)))
-    : await db.select().from(memberships).where(eq(memberships.userId, userId));
+  const member = await collections.memberships().findOne<MembershipDoc>(
+    orgId ? { userId, orgId } : { userId },
+  );
   if (!member || member.status === "suspended") return null;
 
-  const [org] = await db.select().from(organizations).where(eq(organizations.id, member.orgId));
+  const org = await collections.organizations().findOne<{ id: string; name: string }>({ id: member.orgId });
   if (!org) return null;
 
-  const perms = await db
-    .select({ p: rolePermissions.permission })
-    .from(rolePermissions)
-    .where(and(eq(rolePermissions.orgId, member.orgId), eq(rolePermissions.role, member.role)));
+  const perms = await collections
+    .rolePermissions()
+    .find<{ permission: string }>({ orgId: member.orgId, role: member.role })
+    .toArray();
 
   return {
     id: user.id,
@@ -93,7 +85,7 @@ export async function loadAuthUser(userId: string, orgId?: string): Promise<Auth
     emailVerifiedAt: user.emailVerifiedAt,
     mfaEnrolledAt: user.mfaEnrolledAt,
     suspendedAt: user.suspendedAt,
-    permissions: perms.map((p) => p.p),
+    permissions: perms.map((p) => p.permission),
     isPlatformAdmin: false,
   };
 }

@@ -9,9 +9,10 @@
 //
 // Callers should treat the returned credentials as opaque — pass them straight
 // into the upstream client. Plaintext must never appear in API responses or logs.
-import { and, eq } from "drizzle-orm";
-import { db, tenantIntegrations, type TenantIntegrationProvider } from "@j2w/db";
+import { collections } from "../mongo.js";
 import { env } from "../env.js";
+
+export type TenantIntegrationProvider = "vapi" | "deepgram" | "sarvam" | "shunya" | "rekognition";
 import {
   decryptSecret,
   type DeepgramSecret,
@@ -39,10 +40,7 @@ export async function getProviderCredentials<P extends TenantIntegrationProvider
   provider: P,
 ): Promise<SecretFor<P> | null> {
   // 1) Tenant-stored row.
-  const [row] = await db
-    .select({ ciphertext: tenantIntegrations.ciphertext, enabled: tenantIntegrations.enabled })
-    .from(tenantIntegrations)
-    .where(and(eq(tenantIntegrations.orgId, orgId), eq(tenantIntegrations.provider, provider)));
+  const row = await collections.tenantIntegrations().findOne<{ ciphertext: string; enabled: boolean }>({ orgId, provider });
   if (row?.enabled) {
     const secret = decryptSecret<TenantIntegrationSecret>(row.ciphertext);
     if (secret.provider === provider) return secret as SecretFor<P>;

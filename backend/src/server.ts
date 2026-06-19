@@ -11,7 +11,6 @@ import { authRoutes } from "./routes/auth.js";
 import { callsRoutes } from "./routes/calls.js";
 import { assistRoutes } from "./routes/assist.js";
 import { healthRoutes } from "./routes/health.js";
-import { kbRoutes } from "./routes/kb.js";
 import { orgRoutes } from "./routes/org.js";
 import { platformRoutes } from "./routes/platform.js";
 import { rolesRoutes } from "./routes/roles.js";
@@ -148,7 +147,6 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: "/api/auth" });
-  await app.register(kbRoutes, { prefix: "/api/kb" });
   await app.register(callsRoutes, { prefix: "/api/calls" });
   await app.register(assistRoutes, { prefix: "/api/assist" });
   await app.register(candidatesRoutes, { prefix: "/api/candidates" });

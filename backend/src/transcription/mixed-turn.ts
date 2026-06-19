@@ -7,7 +7,8 @@
 // single-stream path (deepgram/single-stream.ts) and the Sarvam/Shunya
 // single-bridge path (transcription/single-bridge.ts) so the two behave
 // identically regardless of which STT provider the recruiter picked.
-import { db, transcriptTurns } from "@j2w/db";
+import { randomUUID } from "node:crypto";
+import { collections } from "../mongo.js";
 import type { TranscriptTurn } from "@j2w/shared-types";
 import type { FastifyBaseLogger } from "fastify";
 import { maybeRubricTick } from "../rag/live-rubric.js";
@@ -15,6 +16,11 @@ import { scorePartial } from "../rag/sentiment.js";
 import { maybeSuggest, rememberTurn } from "../rag/suggest.js";
 import { broadcastToCall } from "../ws/session.js";
 import { provisionalRole } from "./speaker-map.js";
+
+let _turnSeq = Date.now();
+function nextTurnId(): number {
+  return ++_turnSeq;
+}
 
 /**
  * Persist a final mixed-mono turn and fan it out: remember for RAG context,
@@ -33,19 +39,22 @@ export async function handleMixedFinal(
 ): Promise<void> {
   const role = provisionalRole(turn.callId, dgSpeaker);
   turn.speaker = role;
+  // TranscriptTurn.id is a number (used as a UI key + for relabel matching);
+  // keep a monotonic counter and store it on the Mongo doc.
+  turn.id = nextTurnId();
   try {
-    const [row] = await db
-      .insert(transcriptTurns)
-      .values({
-        callId: turn.callId,
-        speaker: role,
-        text: turn.text,
-        isFinal: true,
-        tsStartMs: turn.tsStartMs,
-        tsEndMs: turn.tsEndMs,
-      })
-      .returning();
-    turn.id = row.id;
+    await collections.transcriptTurns().insertOne({
+      docId: randomUUID(),
+      id: turn.id,
+      callId: turn.callId,
+      speaker: role,
+      text: turn.text,
+      isFinal: true,
+      tsStartMs: turn.tsStartMs,
+      tsEndMs: turn.tsEndMs,
+      sentiment: null,
+      createdAt: new Date(),
+    });
   } catch (err) {
     log.error({ err, callId: turn.callId }, "failed to persist mixed-mono transcript turn");
   }
