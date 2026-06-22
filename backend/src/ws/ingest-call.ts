@@ -20,7 +20,7 @@
 //   - Close the Deepgram session
 
 import path from "node:path";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { collections } from "../mongo.js";
 import {
@@ -37,6 +37,7 @@ import type { TranscriptionLanguage } from "../transcription/provider.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
 import { recordAudioUsage } from "../usage/tracker.js";
 import { WavDumper } from "./wav-dump.js";
+import { authenticateOl } from "../auth/olAuth.js";
 
 const DUMP_WAVS = process.env.DUMP_WAVS !== "0"; // default ON for the wedge — needed for post_diarize.
 const DUMP_DIR = path.resolve(process.env.DUMP_DIR ?? "./var/audio-dumps");
@@ -52,45 +53,36 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
   app.get("/ws/ingest-call", { websocket: true }, async (socket: WebSocket, req) => {
     const url = new URL(req.url, "http://local");
     const callId = url.searchParams.get("callId");
-    const token =
-      url.searchParams.get("token") ??
-      (req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null);
     const mode = url.searchParams.get("mode") ?? "browser_mixed";
 
     if (!callId) return socket.close(4400, "missing_callId");
-    if (!token) return socket.close(4401, "missing_token");
     if (mode !== "browser_mixed" && mode !== "desktop_dual_channel") {
       return socket.close(4400, `unsupported_mode:${mode}`);
     }
 
-    let user: { sub: string; email: string };
-    try {
-      user = app.jwt.verify(token) as { sub: string; email: string };
-    } catch {
-      return socket.close(4401, "invalid_token");
-    }
+    // OL SSO — the browser's WebSocket handshake carries the `authToken`
+    // cookie automatically, same as a regular fetch. We use the same
+    // verifier the HTTP routes use.
+    const user = await authenticateOl(req as FastifyRequest);
+    if (!user) return socket.close(4401, "missing_or_invalid_token");
 
-    // Look up the call so we know which org + STT provider to use.
+    // Look up the call. Ownership is by recruiterUserId === user.uid.
     const row = await collections.interviews().findOne<{
-      id: string; orgId: string; recruiterUserId: string | null; mode: string;
+      id: string; recruiterUserId: string | null; mode: string;
       transcriberProvider: string | null; transcriberModel: string | null; transcriberLanguage: string | null;
     }>({ id: callId });
-    if (!row || !row.orgId) return socket.close(4404, "call_not_found");
-    // Permission: the recruiter who owns the call is the only one who can
-    // pump audio into it. (Future: allow QA/lead listen-in via a different
-    // path; not in this phase.)
-    if (row.recruiterUserId && row.recruiterUserId !== user.sub) {
+    if (!row) return socket.close(4404, "call_not_found");
+    if (row.recruiterUserId && row.recruiterUserId !== user.uid) {
       return socket.close(4403, "not_your_call");
     }
 
     // The recruiter's STT selection is persisted on the call (POST /api/calls).
-    // Deepgram runs as a native single-stream; Sarvam/Shunya run through the
-    // same upstream bridges /ws/custom-transcriber uses, fed the browser mic.
     const provider = (row.transcriberProvider ?? "deepgram") as "deepgram" | "sarvam" | "shunya";
     const model = row.transcriberModel ?? undefined;
     const language = (row.transcriberLanguage ?? "multi") as TranscriptionLanguage;
 
-    const creds = await getProviderCredentials(row.orgId, provider);
+    // Multi-tenant integration creds are gone — resolver now reads env only.
+    const creds = await getProviderCredentials(user.uid, provider);
     if (!creds) return socket.close(4503, `${provider}_credentials_missing`);
     const apiKey =
       provider === "sarvam"
@@ -114,6 +106,7 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
       bytesSent: 0,
       startedAt: Date.now(),
     };
+    app.log.info({ callId, recruiter: user.uid, provider, model }, "ingest-call session open");
     const dumper = DUMP_WAVS ? new WavDumper(callId, DUMP_DIR) : null;
 
     socket.on("message", (raw: Buffer, isBinary: boolean) => {
@@ -137,13 +130,11 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
         "ingest-call session closed",
       );
 
-      // Record speech-to-text usage by audio seconds (PCM16 16kHz mono =
-      // 32000 bytes/s). Deepgram/Sarvam/Shunya are billed per audio minute,
-      // so this feeds the Usage tab alongside the LLM token costs.
+      // Usage tracker is a no-op now; left for parity with the old call site.
       const audioSeconds = state.bytesSent / 32000;
-      if (row.orgId && audioSeconds > 0) {
+      if (audioSeconds > 0) {
         void recordAudioUsage(
-          { orgId: row.orgId, callId, operation: provider, model: model ?? "nova-3", seconds: audioSeconds },
+          { orgId: user.uid, callId, operation: provider, model: model ?? "nova-3", seconds: audioSeconds },
           app.log,
         );
       }

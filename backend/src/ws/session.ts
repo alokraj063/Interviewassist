@@ -1,6 +1,7 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { SessionClientMessage, SessionServerMessage } from "@j2w/shared-types";
+import { authenticateOl } from "../auth/olAuth.js";
 
 // Registry of connected browser sessions, keyed by callId. The ingest +
 // Deepgram pipeline (Phase 5) will look up this registry to push events.
@@ -24,20 +25,15 @@ export function hasSessionListeners(callId: string): boolean {
 }
 
 export async function registerSessionWs(app: FastifyInstance): Promise<void> {
-  app.get("/ws/session", { websocket: true }, (socket: WebSocket, req) => {
+  app.get("/ws/session", { websocket: true }, async (socket: WebSocket, req) => {
     const url = new URL(req.url, "http://local");
     const callId = url.searchParams.get("callId");
-    const token = url.searchParams.get("token") ?? extractBearer(req.headers.authorization);
 
     if (!callId) return socket.close(4400, "missing_callId");
-    if (!token) return socket.close(4401, "missing_token");
 
-    let user: { email: string };
-    try {
-      user = app.jwt.verify(token) as { email: string };
-    } catch {
-      return socket.close(4401, "invalid_token");
-    }
+    // OL SSO — the browser's WS handshake carries `authToken` automatically.
+    const user = await authenticateOl(req as FastifyRequest);
+    if (!user) return socket.close(4401, "missing_or_invalid_token");
 
     const sock: SessionSocket = {
       callId,
@@ -68,8 +64,3 @@ export async function registerSessionWs(app: FastifyInstance): Promise<void> {
   });
 }
 
-function extractBearer(header?: string): string | null {
-  if (!header) return null;
-  const m = header.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
-}

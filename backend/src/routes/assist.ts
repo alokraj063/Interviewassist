@@ -141,6 +141,7 @@ const PLAN_SYSTEM = `You are an interview architect + a sharp, honest screener. 
 (2) A TECHNICAL question bank tailored to THIS candidate and role. Generate EXACTLY 20 questions that test the role's required technologies and the specific skills, tools, and projects on the resume.
 
 Hard rules for the questions:
+- GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name MUST literally appear in the JD or the resume provided. NEVER invent or assume a technology the inputs don't contain. If the JD/resume is thin, ask about the role's core named skills only — do not fabricate specifics.
 - TECHNICAL and CONCRETE only. Every question must name a specific technology, tool, framework, concept, algorithm, or a project/claim from the resume or a must-have from the JD. NEVER vague ("tell me about your experience", "what are your strengths", "describe a challenge") — those are banned.
 - Anchor in BOTH the JD's required tech stack AND the candidate's resume. If the JD requires X and the resume claims Y, ask pointed questions about X and probe the depth of Y.
 - Group into EXACTLY three difficulty buckets by "name": "Easy" (core fundamentals / definitions / warm-up on the required tech), "Medium" (applied/practical usage, trade-offs, "how would you…" on real tasks), "Hard" (internals, system design, debugging, scaling, edge cases). Distribute roughly 6 Easy, 8 Medium, 6 Hard — 20 questions total.
@@ -162,9 +163,16 @@ CONTEXT IS CRITICAL — never produce a random question:
 - READ the RECENT TRANSCRIPT first. The next question must FOLLOW ON naturally from what was just said. If the candidate's last answer opened a thread, raised a tool/project, gave a partial or weak answer, or said something worth drilling into, probe THAT specifically.
 - Use the structured Q&A history only to avoid repeating covered ground and to track coverage of the JD must-haves. Use the recent transcript for the immediate, in-context next move.
 - If the conversation just moved to a new topic, continue on that topic rather than snapping back to an unrelated planned question.
+- If RECRUITER-PICKED QUESTIONS are provided, treat them as the recruiter's preferred direction: keep your next question aligned with those topics, depth, and style (don't repeat them verbatim).
+
+GROUNDING — ANTI-HALLUCINATION (the most important rule):
+- NEVER invent, assume, or infer a technology, tool, framework, system, product, or project. You may ONLY name something if that exact word/phrase LITERALLY appears in the JOB DESCRIPTION, the CANDIDATE RESUME, or the verbatim RECENT TRANSCRIPT.
+- If you cannot find a specific to anchor on, ask a plain question about a CORE skill named in the JD. Do NOT fabricate a specific (e.g. never reference "RAC systems", "knowledge graphs", or any term the candidate/JD/resume did not actually contain).
+- The transcript is live speech-to-text and is OFTEN GARBLED. If a turn looks like noise or a misheard word, IGNORE it — do not treat a mis-transcribed fragment as a real topic the candidate raised.
+- When in doubt, prefer a safe JD-grounded question over a clever-but-invented one.
 
 Hard rules:
-- Anchor every question in a SPECIFIC JD requirement AND/OR a specific candidate detail or something they JUST said. Never generic.
+- Anchor every question in a SPECIFIC JD requirement AND/OR a specific candidate detail or something they JUST said — but only things that literally appear in the inputs (see GROUNDING). Never generic, never invented.
 - Prioritise the JD's MUST-HAVE skills first.
 - ROTATE TOPICS — after 1-2 questions on a topic, move to a different uncovered JD requirement.
 - Pace through phases in order: "Opener" (one warm-up tying their background to the role), "Skills" (verify each JD must-have), "Technical Deep-Dive" (drill into a claimed project), "Experience" (behavioural / impact).
@@ -178,9 +186,15 @@ Respond ONLY as JSON with this exact shape:
 {"category": one of "Opener"|"Skills"|"Technical Deep-Dive"|"Experience"|"Follow-up"|"Wrap-up",
  "question": str (empty if done), "done": bool}`;
 
-const VERIFY_SYSTEM = `You are a PRACTICAL interview evaluator helping the recruiter judge each answer in real time. Be FAIR — not harsh. Most real answers are imperfect but acceptable; the recruiter needs to keep moving.
+const VERIFY_SYSTEM = `You are a PRACTICAL interview evaluator helping the recruiter judge, IN REAL TIME, whether the candidate's answer to the CURRENT question is landing. Be FAIR — not harsh. Most real answers are imperfect but acceptable; the recruiter needs to keep moving.
 
-You are given the CURRENT QUESTION and the candidate's ANSWER so far. First decide whether the answer even ADDRESSES the question.
+You are given the CURRENT QUESTION and the RECENT TRANSCRIPT (the last few turns, verbatim).
+
+CRITICAL — read BOTH sides, trust NO labels: this is a single mixed microphone, so the speaker labels (RECRUITER/CANDIDATE) are frequently WRONG. The candidate's actual answer may be mislabeled as the recruiter, or split across turns. Read EVERYTHING in the transcript and reconstruct the candidate's answer from CONTENT — the parts where someone describes their own experience/skills/decisions are the candidate answering; the short probing question is the recruiter. Never discard a turn just because of its label, or you will miss the real answer.
+
+Judge whether the candidate has, across those recent turns, ANSWERED the current question.
+
+GROUNDING — ANTI-HALLUCINATION (critical): Judge ONLY what is LITERALLY in the transcript. NEVER claim the candidate "mentioned X", "talked about X", or "referenced X" unless that exact word/topic actually appears in the transcript above. If the transcript is empty, garbled speech-to-text noise, or doesn't address the question, mark it Off-topic with feedback like "They haven't answered yet." — do NOT invent content or attribute a topic they never said. Your feedback must be defensible against the verbatim transcript.
 
 Calibration (lean lenient):
 - "Strong"   = clear, specific, technically sound; concrete example.
@@ -229,8 +243,10 @@ CRITICAL: the speaker labels in the transcript may be WRONG — it's a single mi
 
 You are given the CURRENT planned question and the most recent transcript turns. Decide:
 - Has the interviewer, in the latest turn(s), asked a question to the candidate that is MATERIALLY DIFFERENT from the CURRENT question (a different topic/skill, or a clearly different ask)? Ignore acknowledgements, small talk, restating the same question, or the candidate speaking.
-- If yes: return asked=true with "question" = the question the interviewer actually asked, cleaned into ONE short, clear sentence (max ~16 words), and a short "category" (e.g. "Recruiter asked", "Skills", "Follow-up").
+- If yes: return asked=true with "question" = the question the interviewer ACTUALLY asked, paraphrased faithfully into ONE short, clear sentence (max ~16 words), and a short "category" (e.g. "Recruiter asked", "Skills", "Follow-up").
 - If the latest turns are just the candidate answering, or the interviewer asked essentially the SAME current question, or nothing question-like was asked: asked=false with question="".
+
+ANTI-HALLUCINATION: only report a question that was LITERALLY asked in the transcript. Never invent a topic or technology that isn't in the turns. The transcript is live speech-to-text and is often garbled — if the latest turns are noise / unintelligible, return asked=false. Do not turn a misheard fragment into a question.
 
 Respond ONLY as JSON: {"asked": bool, "question": str, "category": str}`;
 
@@ -288,6 +304,9 @@ export async function assistRoutes(app: FastifyInstance) {
           .array(z.object({ speaker: z.string().default(""), text: z.string() }))
           .max(40)
           .default([]),
+        // Questions the recruiter manually picked from the bank — their
+        // preferred direction. Used to steer/improve subsequent questions.
+        picked: z.array(z.string()).max(40).default([]),
       })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
@@ -295,10 +314,13 @@ export async function assistRoutes(app: FastifyInstance) {
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
     const recent = body.data.transcript
-      .slice(-10)
+      .slice(-6)
       .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
       .join("\n");
-    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nQ&A SO FAR (coverage):\n${fmtHistory(body.data.history)}\n\nRECENT TRANSCRIPT (last turns, verbatim — use for immediate context; labels may be imperfect):\n${recent || "(nothing spoken yet)"}`;
+    const pickedBlock = body.data.picked.length
+      ? `\n\nRECRUITER-PICKED QUESTIONS (their chosen direction — align your next question to the same topics, depth, and style; don't repeat them verbatim):\n${body.data.picked.slice(-8).map((q) => `- ${q}`).join("\n")}`
+      : "";
+    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nQ&A SO FAR (coverage):\n${fmtHistory(body.data.history)}\n\nRECENT TRANSCRIPT (last ~6 turns, verbatim — use for immediate context; labels may be imperfect):\n${recent || "(nothing spoken yet)"}${pickedBlock}`;
     const result = await gptJson(NEXT_SYSTEM, user, { orgId: req.authUser!.uid, operation: "next", callId: body.data.callId });
     return {
       ok: true,
@@ -308,19 +330,33 @@ export async function assistRoutes(app: FastifyInstance) {
     };
   });
 
-  // Did the candidate actually answer the current question?
+  // Is the candidate's answer to the current question landing? Judged from the
+  // recent transcript (BOTH sides — labels are unreliable on a mixed mic).
   app.post("/verify", async (req, reply) => {
     if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
     const body = z
       .object({
         callId: z.string().uuid(),
         question: z.string(),
+        // Preferred: the last few transcript turns (both speakers). `answer`
+        // is kept for backward compatibility when no transcript is sent.
+        transcript: z
+          .array(z.object({ speaker: z.string().default(""), text: z.string() }))
+          .max(40)
+          .default([]),
         answer: z.string().default(""),
       })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
 
-    const user = `CURRENT QUESTION:\n${body.data.question}\n\nCANDIDATE ANSWER SO FAR:\n${body.data.answer || "(nothing substantive yet)"}`;
+    const recent = body.data.transcript
+      .slice(-6)
+      .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
+      .join("\n");
+    const answerBlock = recent
+      ? `RECENT TRANSCRIPT (last turns, both sides — labels may be wrong, read everything):\n${recent}`
+      : `CANDIDATE ANSWER SO FAR:\n${body.data.answer || "(nothing substantive yet)"}`;
+    const user = `CURRENT QUESTION:\n${body.data.question}\n\n${answerBlock}`;
     const result = await gptJson(VERIFY_SYSTEM, user, { orgId: req.authUser!.uid, operation: "verify", callId: body.data.callId });
     return {
       ok: true,
@@ -339,7 +375,7 @@ export async function assistRoutes(app: FastifyInstance) {
     if (body.data.transcript.length === 0) return { ok: true, asked: false, question: "", category: "" };
 
     const lines = body.data.transcript
-      .slice(-12)
+      .slice(-6)
       .map((t) => `${(t.speaker || "?").toUpperCase()}: ${t.text}`)
       .join("\n");
     const user = `CURRENT QUESTION: ${body.data.currentQuestion || "(none yet)"}\n\nRECENT TRANSCRIPT (labels may be wrong — judge by content):\n${lines}`;
@@ -354,6 +390,36 @@ export async function assistRoutes(app: FastifyInstance) {
       question: ((result.question as string) ?? "").trim(),
       category: ((result.category as string) ?? "Recruiter asked").trim(),
     };
+  });
+
+  // Auto-store a single answered Q&A on the interview doc (called by the UI
+  // when it advances to the next question, so the asked/answered pair is saved
+  // immediately — not only at /final).
+  app.post("/answer", async (req, reply) => {
+    const body = z
+      .object({
+        callId: z.string().uuid(),
+        category: z.string().default(""),
+        question: z.string(),
+        answer: z.string().default(""),
+        verdict: z.string().default(""),
+        feedback: z.string().default(""),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ ok: false, error: "invalid_payload" });
+    const call = await collections.interviews().findOne<{ recruiterUserId: string }>({ id: body.data.callId });
+    if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ ok: false, error: "not_found" });
+    const entry = {
+      category: body.data.category,
+      question: body.data.question,
+      answer: body.data.answer,
+      verdict: body.data.verdict,
+      feedback: body.data.feedback,
+      at: new Date(),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collections.interviews().updateOne({ id: body.data.callId }, { $push: { qa: entry } } as any);
+    return { ok: true };
   });
 
   // End-of-call calibrated score.
