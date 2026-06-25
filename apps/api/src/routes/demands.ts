@@ -414,8 +414,31 @@ export async function demandsRoutes(app: FastifyInstance) {
       .trim();
   }
 
-  // Return the cached bank (or null) for a demand.
-  app.get("/:id/question-bank", { preHandler: [app.requirePermission("demands.read")] }, async (req, reply) => {
+  // A demand's question bank is stored as an ordered list of VERSIONS — v1 is
+  // the base JD; each later version layers extra JD points the recruiter typed
+  // when generating. Normalise whatever is stored (incl. the older single-bank
+  // shape) into a versions array.
+  type StoredVersion = { version: number; addedJd: string; bank: unknown; generatedAt: string | null };
+  function toVersions(raw: unknown, generatedAt: Date | null): StoredVersion[] {
+    if (!raw || typeof raw !== "object") return [];
+    const o = raw as { kind?: string; versions?: unknown; skills?: unknown };
+    if (o.kind === "jd_question_bank_versions" && Array.isArray(o.versions)) {
+      return (o.versions as StoredVersion[]).map((v, i) => ({
+        version: typeof v.version === "number" ? v.version : i + 1,
+        addedJd: typeof v.addedJd === "string" ? v.addedJd : "",
+        bank: v.bank,
+        generatedAt: v.generatedAt ?? null,
+      }));
+    }
+    // Older single-bank shape → wrap it as version 1.
+    if (Array.isArray(o.skills) || o.kind === "jd_question_bank") {
+      return [{ version: 1, addedJd: "", bank: raw, generatedAt: generatedAt ? generatedAt.toISOString() : null }];
+    }
+    return [];
+  }
+
+  // Return all stored question-bank versions for a demand.
+  app.get("/:id/question-bank", async (req, reply) => {
     const ctx = req.authUser!;
     const { id } = req.params as { id: string };
     const [row] = await db
@@ -423,16 +446,20 @@ export async function demandsRoutes(app: FastifyInstance) {
       .from(demands)
       .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
     if (!row) return reply.code(404).send({ error: "demand_not_found" });
-    return { ok: true, bank: row.bank ?? null, generatedAt: row.generatedAt ?? null, assessmentNotes: row.notes ?? "" };
+    return { ok: true, versions: toVersions(row.bank, row.generatedAt), assessmentNotes: row.notes ?? "" };
   });
 
-  // Generate (and cache) the bank for a demand. Reuses the cached bank unless
-  // `force` is set — so the same JD is never regenerated again and again.
-  app.post("/:id/question-bank", { preHandler: [app.requirePermission("demands.write")] }, async (req, reply) => {
+  // Generate a question bank version for a demand.
+  //  - If `addedJd` text is provided → generate a NEW version using the JD PLUS
+  //    those extra points (so v2, v3… reflect what the recruiter asked for).
+  //  - If `addedJd` is blank AND versions already exist → return the existing
+  //    versions unchanged (load the old JD only — no regeneration).
+  //  - If `addedJd` is blank and there is NO bank yet → generate v1 from the JD.
+  app.post("/:id/question-bank", async (req, reply) => {
     if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
     const ctx = req.authUser!;
     const { id } = req.params as { id: string };
-    const force = (req.body as { force?: boolean } | undefined)?.force === true;
+    const addedJd = ((req.body as { addedJd?: string } | undefined)?.addedJd ?? "").trim();
 
     const [row] = await db
       .select({
@@ -452,25 +479,36 @@ export async function demandsRoutes(app: FastifyInstance) {
       .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
     if (!row) return reply.code(404).send({ ok: false, error: "demand_not_found" });
 
-    // Reuse the cached bank unless the caller explicitly forces a regenerate.
-    if (row.bank && !force) {
-      return { ok: true, cached: true, bank: row.bank, generatedAt: row.generatedAt, assessmentNotes: row.assessmentNotes ?? "" };
+    const versions = toVersions(row.bank, row.generatedAt);
+
+    // Nothing added and a bank already exists → just load the old one.
+    if (!addedJd && versions.length > 0) {
+      return { ok: true, created: false, versions, assessmentNotes: row.assessmentNotes ?? "" };
     }
 
-    const jd = await buildJdText(row);
-    if (!jd) return reply.code(400).send({ ok: false, error: "demand_has_no_jd" });
+    const baseJd = await buildJdText(row);
+    if (!baseJd) return reply.code(400).send({ ok: false, error: "demand_has_no_jd" });
+    const effectiveJd = addedJd
+      ? `${baseJd}\n\nADDITIONAL JD POINTS (added by the recruiter — weight these too):\n${addedJd}`
+      : baseJd;
 
-    const bank = await generateJdQuestionBank(jd, row.assessmentNotes ?? "", {
+    const bank = await generateJdQuestionBank(effectiveJd, row.assessmentNotes ?? "", {
       orgId: ctx.orgId,
       operation: "plan",
     });
     const generatedAt = new Date();
+    const nextVersion = (versions[versions.length - 1]?.version ?? 0) + 1;
+    const newVersions: StoredVersion[] = [
+      ...versions,
+      { version: nextVersion, addedJd, bank, generatedAt: generatedAt.toISOString() },
+    ];
+    const stored = { kind: "jd_question_bank_versions", versions: newVersions };
     await db
       .update(demands)
-      .set({ questionBank: bank as unknown as Record<string, unknown>, questionBankGeneratedAt: generatedAt, updatedAt: generatedAt })
+      .set({ questionBank: stored as unknown as Record<string, unknown>, questionBankGeneratedAt: generatedAt, updatedAt: generatedAt })
       .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
 
-    return { ok: true, cached: false, bank, generatedAt: generatedAt.toISOString(), assessmentNotes: row.assessmentNotes ?? "" };
+    return { ok: true, created: true, version: nextVersion, versions: newVersions, assessmentNotes: row.assessmentNotes ?? "" };
   });
 
   // ---------- ASSIGN RECRUITERS ----------

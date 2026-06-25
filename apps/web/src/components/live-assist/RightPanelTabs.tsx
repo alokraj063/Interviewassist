@@ -1,21 +1,20 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { QuestionBankPanel } from "./QuestionBankPanel";
-import { RubricLivePanel, type LiveRubricSnapshot } from "./RubricLivePanel";
-import { CompliancePanel } from "./CompliancePanel";
+import { type LiveRubricSnapshot } from "./RubricLivePanel";
 import { NotesPanel } from "./NotesPanel";
 
-type RightTab = "question-bank" | "rubric" | "compliance" | "notes";
+type RightTab = "question-bank" | "notes";
 
 export function RightPanelTabs({
   callId,
-  liveRubric,
   demandId,
   onAsk,
   generatedPlan,
   generating,
 }: {
   callId?: string;
+  // Kept for call-site compatibility; the live rubric tab was removed.
   liveRubric?: LiveRubricSnapshot | null;
   demandId?: string;
   onAsk?: (question: string, category: string) => void;
@@ -25,8 +24,6 @@ export function RightPanelTabs({
   const [tab, setTab] = useState<RightTab>("question-bank");
   const tabs: { id: RightTab; label: string }[] = [
     { id: "question-bank", label: "Question bank" },
-    { id: "rubric", label: "Rubric live" },
-    { id: "compliance", label: "Discovery" },
     { id: "notes", label: "Notes" },
   ];
   return (
@@ -51,8 +48,6 @@ export function RightPanelTabs({
         {tab === "question-bank" && (
           <QuestionBankPanel demandId={demandId} onAsk={onAsk} generatedPlan={generatedPlan} generating={generating} />
         )}
-        {tab === "rubric" && <RubricLivePanel liveRubric={liveRubric} />}
-        {tab === "compliance" && <CompliancePanel />}
         {tab === "notes" && <NotesPanel callId={callId} />}
       </div>
     </div>

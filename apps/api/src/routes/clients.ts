@@ -29,8 +29,9 @@ export async function clientsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
 
   // List clients for the caller's org (powers the client picker on the
-  // "Add job" form and the new "Add client" card).
-  app.get("/", { preHandler: [app.requirePermission("clients.read")] }, async (req) => {
+  // "Add job" form and the new "Add client" card). Open to any authenticated
+  // user in the org — no special permission required.
+  app.get("/", async (req) => {
     const ctx = req.authUser!;
     const rows = await db
       .select({
@@ -46,8 +47,9 @@ export async function clientsRoutes(app: FastifyInstance) {
     return { clients: rows };
   });
 
-  // Create a client.
-  app.post("/", { preHandler: [app.requirePermission("clients.write")] }, async (req, reply) => {
+  // Create a client. Open to ANY authenticated user in the org (clients are
+  // org-scoped to the caller's org, so this can't leak across tenants).
+  app.post("/", async (req, reply) => {
     const ctx = req.authUser!;
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {

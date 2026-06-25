@@ -19,8 +19,8 @@ import { toast } from "sonner";
 export default function LiveAssistSettings() {
   const canCreateDemand = useCan("demands.write");
   const canCreateCandidate = useCan("candidates.write");
-  const canCreateClient = useCan("clients.write");
-  const canReadClients = useCan("clients.read");
+  // Creating clients is open to any user (the API no longer gates it), so the
+  // "Add client" card and the clients list are always available.
   const qc = useQueryClient();
   const { data: demands = [] } = useDemands({});
 
@@ -29,7 +29,6 @@ export default function LiveAssistSettings() {
   const { data: clientsData } = useQuery<{ clients: Array<{ id: string; name: string }> }>({
     queryKey: ["clients", "all"],
     queryFn: () => apiFetch("/api/clients"),
-    enabled: canReadClients,
   });
 
   // Fallback for accounts without clients.read: derive distinct clients from
@@ -88,7 +87,7 @@ export default function LiveAssistSettings() {
       {tab === "jd" && (
         <div className="space-y-3">
           <AddClientCard
-            disabled={!canCreateClient}
+            disabled={false}
             onCreated={() => qc.invalidateQueries({ queryKey: ["clients"] })}
           />
           <AddJobCard
