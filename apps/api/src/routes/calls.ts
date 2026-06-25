@@ -919,6 +919,10 @@ export async function callsRoutes(app: FastifyInstance) {
   // with the assigned recruiter joined in.
   app.get("/", { preHandler: [app.requirePermission("calls.read")] }, async (req) => {
     const orgId = req.authUser!.orgId;
+    const q = req.query as { limit?: string; withEvaluation?: string };
+    const limit = Math.min(500, Math.max(1, Number(q.limit) || 100));
+    const onlyEval = q.withEvaluation === "true";
+
     const rows = await db
       .select({
         id: callSessions.id,
@@ -932,11 +936,37 @@ export async function callsRoutes(app: FastifyInstance) {
         recruiterUserId: callSessions.recruiterUserId,
         recruiterName: users.name,
         recruiterEmail: users.email,
+        demandTitle: demands.title,
+        candidateName: candidates.displayName,
+        // The stored end-of-call evaluation (verdict + score + summary), if any.
+        summary: callSessions.summary,
       })
       .from(callSessions)
       .leftJoin(users, eq(users.id, callSessions.recruiterUserId))
+      .leftJoin(demands, eq(demands.id, callSessions.demandId))
+      .leftJoin(candidates, eq(candidates.id, callSessions.candidateId))
       .where(eq(callSessions.orgId, orgId))
-      .orderBy(callSessions.startedAt);
-    return { calls: rows };
+      .orderBy(desc(callSessions.startedAt))
+      .limit(limit);
+
+    // Surface a compact eval read on each row; keep the full summary too.
+    const calls = rows
+      .map((r) => {
+        const ev =
+          r.summary && typeof r.summary === "object" && (r.summary as { kind?: string }).kind === "interview_eval"
+            ? (r.summary as { verdict?: string; score?: { overall?: number }; summary?: string; candidateName?: string })
+            : null;
+        return {
+          ...r,
+          hasEvaluation: !!ev,
+          verdict: ev?.verdict ?? null,
+          overallScore: ev?.score?.overall ?? null,
+          summaryText: ev?.summary ?? null,
+          label: r.candidateName || ev?.candidateName || r.candidateRefOrPhone || "Untitled call",
+        };
+      })
+      .filter((r) => (onlyEval ? r.hasEvaluation : true));
+
+    return { calls };
   });
 }

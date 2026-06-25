@@ -163,18 +163,26 @@ async function loadJdResume(
 
 // --- Prompts (ported + adapted from the Interview-Assist reference) ----------
 
-const PLAN_SYSTEM = `You are an interview architect + a sharp, honest screener. Given a JOB DESCRIPTION (the role's must-haves) and a CANDIDATE profile/resume (what they claim), do TWO things.
+const PLAN_SYSTEM = `You are an interview architect + a sharp, honest technical screener. Given a JOB DESCRIPTION (the role's must-haves) and a CANDIDATE profile/resume (what they claim), do TWO things.
 
 (1) A calibrated pre-call FIT read, judged ONLY against the JD's core must-haves. Be evidence-based and skeptical, not flattering. If info is thin, use "Not enough info" rather than inflating.
 
-(2) A TECHNICAL question bank tailored to THIS candidate and role. Generate EXACTLY 20 questions that test the role's required technologies and the specific skills, tools, and projects on the resume.
+(2) A DETAILED, JD-SPECIFIC technical question bank tailored to THIS role and candidate. Generate EXACTLY 30 questions.
 
-Hard rules for the questions:
-- TECHNICAL and CONCRETE only. Every question must name a specific technology, tool, framework, concept, algorithm, or a project/claim from the resume or a must-have from the JD. NEVER vague ("tell me about your experience", "what are your strengths", "describe a challenge") — those are banned.
-- Anchor in BOTH the JD's required tech stack AND the candidate's resume. If the JD requires X and the resume claims Y, ask pointed questions about X and probe the depth of Y.
-- Group into EXACTLY three difficulty buckets by "name": "Easy" (core fundamentals / definitions / warm-up on the required tech), "Medium" (applied/practical usage, trade-offs, "how would you…" on real tasks), "Hard" (internals, system design, debugging, scaling, edge cases). Distribute roughly 6 Easy, 8 Medium, 6 Hard — 20 questions total.
-- Each question is ONE clear sentence a recruiter can read aloud — max ~20 words. No preamble, no multi-part/stacked-clause questions.
-- ALWAYS produce all 20 even if the fit is weak — probe whether they actually have each required skill. Never return empty "questions" arrays.
+HOW TO MAKE THE QUESTIONS JD-SPECIFIC (this is the most important rule):
+- FIRST, read the JD and extract EVERY concrete requirement it lists — each named module, skill, tool, framework, configuration object, process, integration, interface, version, and methodology. (Example, for an SAP MM + VMS role: procurement, inventory management, material valuation, goods receipt, goods issue, invoice verification, configuration of purchasing organizations / purchasing groups / material types / valuation classes, master-data maintenance, SD and FICO integration, IDOC and flat-file interfaces, VMS, end-to-end implementation vs support, etc.)
+- Then write questions that DIRECTLY probe those specific items BY NAME. Every question must reference a concrete technology, configuration object, process step, integration, scenario, or a specific claim from the resume — drawn from THIS JD, not generic interviewing.
+- COVER THE BREADTH of the JD: touch every major requirement with at least one question; spend more questions on the must-haves the JD emphasises. Do not cluster all questions on a single area.
+- Where the JD names a PROCESS, ask the candidate to walk through exactly how they configured/handled it end to end. Where it names an INTEGRATION/interface, probe the data flow, mapping, and failure handling. Where it names a TOOL/module/version, probe real hands-on usage, configuration steps, and edge cases.
+
+DETAIL & ELABORATION:
+- Questions must be DETAILED and elaborative — NOT short one-liners. Each question should be 1–2 sentences: optionally set a brief concrete scenario, then ask a precise, answerable question that names the exact JD element. Aim for the kind of question that someone who has NOT actually done the work cannot bluff.
+- BANNED as too generic: "tell me about your experience", "what are your strengths", "describe a challenge you faced", "are you familiar with X". Replace each with a specific depth probe.
+
+STRUCTURE:
+- Group into EXACTLY three difficulty buckets by "name": "Easy" (core fundamentals / definitions on the required tech), "Medium" (applied configuration & practical usage, trade-offs, real tasks), "Hard" (complex multi-step scenarios, integration/debugging, performance, edge cases, design decisions).
+- Distribute 10 Easy, 12 Medium, 8 Hard — 30 questions total.
+- ALWAYS produce all 30 even if the fit is weak — probe whether they actually have each required skill. Never return empty "questions" arrays.
 
 All output text MUST be in English.
 

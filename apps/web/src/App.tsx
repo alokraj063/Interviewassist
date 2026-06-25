@@ -20,6 +20,7 @@ import AcceptInvite from "@/pages/auth/AcceptInvite";
 import LiveAssistSetup from "@/pages/LiveAssistSetup";
 import LiveAssistSettings from "@/pages/LiveAssistSettings";
 import LiveAssistUsage from "@/pages/LiveAssistUsage";
+import LiveAssistHistory from "@/pages/LiveAssistHistory";
 import NotFound from "@/pages/NotFound";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
@@ -57,6 +58,7 @@ const App = () => (
               <Route path="/live-assist" element={<LiveAssistSetup />} />
               <Route path="/live-assist/settings" element={<LiveAssistSettings />} />
               <Route path="/live-assist/usage" element={<LiveAssistUsage />} />
+              <Route path="/live-assist/history" element={<LiveAssistHistory />} />
             </Route>
 
             <Route path="*" element={<NotFound />} />
