@@ -121,11 +121,21 @@ export function QuestionBankPanel({
             )}
           </div>
           {versions.length > 1 && (
-            <div className="flex flex-wrap gap-1 mt-1.5">
+            <div className="flex flex-wrap items-center gap-1 mt-2">
+              <span className="text-[10px] uppercase tracking-wide text-muted-foreground mr-1">Versions</span>
               {versions.map((v) => (
-                <button key={v.version} onClick={() => setActiveVersion(v.version)}
-                  className={cn("text-[11px] px-2 py-0.5 rounded-full border transition-colors",
-                    current?.version === v.version ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:text-foreground")}>
+                <button
+                  key={v.version}
+                  type="button"
+                  onClick={() => setActiveVersion(v.version)}
+                  title={v.addedJd ? `Added: ${v.addedJd}` : "Base JD"}
+                  className={cn(
+                    "text-xs font-medium px-2.5 py-1 rounded-full border transition-colors",
+                    (current?.version ?? latest?.version) === v.version
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:text-foreground hover:border-primary/50",
+                  )}
+                >
                   v{v.version}
                 </button>
               ))}
