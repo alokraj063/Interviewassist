@@ -14,6 +14,8 @@ import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, exists, ilike, inArray, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { parseDocument } from "@j2w/ingest-shared";
+import { env } from "../env.js";
+import { generateJdQuestionBank } from "./assist.js";
 import {
   candidates,
   clients,
@@ -58,6 +60,9 @@ const createSchema = z.object({
   numberOfOpenings: z.number().int().min(1).max(500).default(1),
   maxSubmissions: z.number().int().min(1).max(2000).optional(),
   primaryLocation: z.string().max(120).optional(),
+  // Free-text emphasis for question/interview generation (e.g. "give extra
+  // weight to VMS and IDOC integration").
+  assessmentNotes: z.string().max(4000).optional(),
   status: z.enum(["draft", "active", "on_hold", "closed", "cancelled"]).default("draft"),
   isVip: z.boolean().default(false),
   clientInternalTicketId: z.string().max(80).optional(),
@@ -283,6 +288,7 @@ export async function demandsRoutes(app: FastifyInstance) {
         jobRoleId: parsed.data.jobRoleId ?? null,
         probingDetails: parsed.data.probingDetails ?? null,
         mandatoryChecks: parsed.data.mandatoryChecks,
+        assessmentNotes: parsed.data.assessmentNotes ?? null,
       })
       .returning({ id: demands.id });
 
@@ -365,6 +371,7 @@ export async function demandsRoutes(app: FastifyInstance) {
     if (d.jobRoleId !== undefined) updates.jobRoleId = d.jobRoleId;
     if (d.probingDetails !== undefined) updates.probingDetails = d.probingDetails;
     if (d.mandatoryChecks !== undefined) updates.mandatoryChecks = d.mandatoryChecks;
+    if (d.assessmentNotes !== undefined) updates.assessmentNotes = d.assessmentNotes;
 
     const result = await db
       .update(demands)
@@ -374,6 +381,96 @@ export async function demandsRoutes(app: FastifyInstance) {
     if (result.length === 0) return reply.code(404).send({ error: "demand_not_found" });
 
     return { ok: true };
+  });
+
+  // ---------- JD QUESTION BANK (cached per demand, skill-wise) ----------
+  // Build the JD text the generator reads from a demand row + its client.
+  async function buildJdText(d: {
+    title: string | null;
+    designation: string | null;
+    description: string | null;
+    responsibilities: string | null;
+    experienceMinYears: string | null;
+    experienceMaxYears: string | null;
+    primaryLocation: string | null;
+    clientId: string | null;
+  }): Promise<string> {
+    let client: string | null = null;
+    if (d.clientId) {
+      const [c] = await db.select({ name: clients.companyName }).from(clients).where(eq(clients.id, d.clientId));
+      client = c?.name ?? null;
+    }
+    const exp = [d.experienceMinYears, d.experienceMaxYears].filter(Boolean).join("–");
+    return [
+      `ROLE: ${d.title ?? "(untitled)"}${d.designation ? ` (${d.designation})` : ""}`,
+      client ? `CLIENT: ${client}` : "",
+      exp ? `EXPERIENCE REQUIRED: ${exp} years` : "",
+      d.primaryLocation ? `LOCATION: ${d.primaryLocation}` : "",
+      d.description ? `\nJOB DESCRIPTION:\n${d.description}` : "",
+      d.responsibilities ? `\nRESPONSIBILITIES:\n${d.responsibilities}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+
+  // Return the cached bank (or null) for a demand.
+  app.get("/:id/question-bank", { preHandler: [app.requirePermission("demands.read")] }, async (req, reply) => {
+    const ctx = req.authUser!;
+    const { id } = req.params as { id: string };
+    const [row] = await db
+      .select({ bank: demands.questionBank, generatedAt: demands.questionBankGeneratedAt, notes: demands.assessmentNotes })
+      .from(demands)
+      .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
+    if (!row) return reply.code(404).send({ error: "demand_not_found" });
+    return { ok: true, bank: row.bank ?? null, generatedAt: row.generatedAt ?? null, assessmentNotes: row.notes ?? "" };
+  });
+
+  // Generate (and cache) the bank for a demand. Reuses the cached bank unless
+  // `force` is set — so the same JD is never regenerated again and again.
+  app.post("/:id/question-bank", { preHandler: [app.requirePermission("demands.write")] }, async (req, reply) => {
+    if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
+    const ctx = req.authUser!;
+    const { id } = req.params as { id: string };
+    const force = (req.body as { force?: boolean } | undefined)?.force === true;
+
+    const [row] = await db
+      .select({
+        title: demands.title,
+        designation: demands.designation,
+        description: demands.description,
+        responsibilities: demands.responsibilities,
+        experienceMinYears: demands.experienceMinYears,
+        experienceMaxYears: demands.experienceMaxYears,
+        primaryLocation: demands.primaryLocation,
+        clientId: demands.clientId,
+        assessmentNotes: demands.assessmentNotes,
+        bank: demands.questionBank,
+        generatedAt: demands.questionBankGeneratedAt,
+      })
+      .from(demands)
+      .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
+    if (!row) return reply.code(404).send({ ok: false, error: "demand_not_found" });
+
+    // Reuse the cached bank unless the caller explicitly forces a regenerate.
+    if (row.bank && !force) {
+      return { ok: true, cached: true, bank: row.bank, generatedAt: row.generatedAt, assessmentNotes: row.assessmentNotes ?? "" };
+    }
+
+    const jd = await buildJdText(row);
+    if (!jd) return reply.code(400).send({ ok: false, error: "demand_has_no_jd" });
+
+    const bank = await generateJdQuestionBank(jd, row.assessmentNotes ?? "", {
+      orgId: ctx.orgId,
+      operation: "plan",
+    });
+    const generatedAt = new Date();
+    await db
+      .update(demands)
+      .set({ questionBank: bank as unknown as Record<string, unknown>, questionBankGeneratedAt: generatedAt, updatedAt: generatedAt })
+      .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
+
+    return { ok: true, cached: false, bank, generatedAt: generatedAt.toISOString(), assessmentNotes: row.assessmentNotes ?? "" };
   });
 
   // ---------- ASSIGN RECRUITERS ----------

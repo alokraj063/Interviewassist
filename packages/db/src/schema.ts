@@ -1213,6 +1213,15 @@ export const demands = pgTable(
     }>(),
     mandatoryChecks: jsonb("mandatory_checks").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
 
+    // Recruiter's free-text emphasis for interview/question generation, e.g.
+    // "give extra importance to VMS and IDOC integration". Fed into the
+    // question-bank generator so the bank weights what the recruiter cares about.
+    assessmentNotes: text("assessment_notes"),
+    // Cached, JD-specific question bank (generated once, reused across calls).
+    // Shape: { kind:"jd_question_bank", skills:[{skill, questions:[{difficulty,question}]}], ... }
+    questionBank: jsonb("question_bank").$type<Record<string, unknown>>(),
+    questionBankGeneratedAt: timestamp("question_bank_generated_at", { withTimezone: true }),
+
     externalOfferLetterDemandId: integer("external_offer_letter_demand_id"),
     externalDataHash: text("external_data_hash"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),

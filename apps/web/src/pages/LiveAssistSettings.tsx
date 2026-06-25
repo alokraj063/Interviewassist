@@ -253,7 +253,7 @@ function AddCandidateCard({ disabled, onCreated }: { disabled: boolean; onCreate
 }
 
 function AddJobCard({ disabled, clients, onCreated }: { disabled: boolean; clients: Array<{ id: string; name: string }>; onCreated: () => void }) {
-  const [f, setF] = useState({ clientId: "", title: "", description: "", primaryLocation: "", experienceMinYears: "", experienceMaxYears: "", bankId: "" });
+  const [f, setF] = useState({ clientId: "", title: "", description: "", primaryLocation: "", experienceMinYears: "", experienceMaxYears: "", bankId: "", assessmentNotes: "" });
   const [busy, setBusy] = useState(false);
 
   // Question banks to optionally link — so live-assist loads this JD's bank.
@@ -294,6 +294,7 @@ function AddJobCard({ disabled, clients, onCreated }: { disabled: boolean; clien
           primaryLocation: f.primaryLocation.trim() || undefined,
           experienceMinYears: f.experienceMinYears ? Number(f.experienceMinYears) : undefined,
           experienceMaxYears: f.experienceMaxYears ? Number(f.experienceMaxYears) : undefined,
+          assessmentNotes: f.assessmentNotes.trim() || undefined,
           status: "active",
         },
       });
@@ -309,7 +310,7 @@ function AddJobCard({ disabled, clients, onCreated }: { disabled: boolean; clien
         }
       }
       toast.success(`Job "${f.title}" added`);
-      setF({ clientId: "", title: "", description: "", primaryLocation: "", experienceMinYears: "", experienceMaxYears: "", bankId: "" });
+      setF({ clientId: "", title: "", description: "", primaryLocation: "", experienceMinYears: "", experienceMaxYears: "", bankId: "", assessmentNotes: "" });
       onCreated();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not create job");
@@ -363,6 +364,15 @@ function AddJobCard({ disabled, clients, onCreated }: { disabled: boolean; clien
               onChange={(e) => setF((s) => ({ ...s, description: e.target.value }))}
               rows={5}
               placeholder="Must-have skills, responsibilities, tech stack…"
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </Field>
+          <Field label="Assessment emphasis (optional — steers the generated questions)">
+            <textarea
+              value={f.assessmentNotes}
+              onChange={(e) => setF((s) => ({ ...s, assessmentNotes: e.target.value }))}
+              rows={2}
+              placeholder="e.g. Give extra importance to VMS and IDOC integration; probe hands-on configuration depth."
               className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
             />
           </Field>

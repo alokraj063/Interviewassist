@@ -289,6 +289,61 @@ const historySchema = z.array(
   }),
 );
 
+// --- JD-specific, SKILL-WISE question bank (generated once per demand) -------
+const BANK_SYSTEM = `You are an expert technical interviewer building a reusable QUESTION BANK for a specific JOB DESCRIPTION. The bank is organised SKILL-WISE: grouped by the distinct skills/areas the JD requires.
+
+STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
+
+STEP 2 — For EACH skill, write DETAILED, SPECIFIC questions that probe real hands-on depth in THAT skill — name the exact configuration object, process step, or scenario. Each question is 1–2 sentences (a brief scenario then a precise ask). NO generic questions ("tell me about your experience", "what are your strengths"). Mix difficulties within each skill and tag each: "Easy" (fundamentals), "Medium" (applied configuration/usage), "Hard" (complex scenarios, integration/debugging, edge cases).
+
+EMPHASIS: If the recruiter provided EMPHASIS NOTES, weight the bank accordingly — give the emphasised skills MORE questions and HARDER ones, and put those skills first.
+
+SIZE: Produce about 30 questions total (more if the JD is broad), spread across the skills — roughly 3–6 per skill, more for emphasised/core skills. Never return empty.
+
+All output text MUST be in English.
+
+Respond ONLY as JSON with this exact shape:
+{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "question": str}, ...]}, ...]}`;
+
+export interface JdQuestionBank {
+  kind: "jd_question_bank";
+  skills: Array<{ skill: string; questions: Array<{ difficulty: string; question: string }> }>;
+  notesUsed: string;
+  total: number;
+  generatedAt: string;
+}
+
+/** Generate a skill-wise question bank for a JD (+ optional emphasis notes). */
+export async function generateJdQuestionBank(
+  jd: string,
+  notes: string,
+  track: { orgId: string; operation: string; callId?: string | null },
+): Promise<JdQuestionBank> {
+  const user = `JOB DESCRIPTION:\n${jd || "(none provided)"}\n\nEMPHASIS NOTES (the recruiter wants extra weight here):\n${notes?.trim() || "(none)"}`;
+  const result = await gptJson(BANK_SYSTEM, user, track);
+  const rawSkills = Array.isArray(result.skills) ? (result.skills as unknown[]) : [];
+  const skills = rawSkills
+    .map((s) => {
+      const o = s as { skill?: unknown; questions?: unknown };
+      const qs = Array.isArray(o.questions) ? (o.questions as unknown[]) : [];
+      return {
+        skill: typeof o.skill === "string" ? o.skill : "General",
+        questions: qs
+          .map((q) => {
+            const qo = q as { difficulty?: unknown; question?: unknown };
+            return {
+              difficulty: ["Easy", "Medium", "Hard"].includes(qo.difficulty as string) ? (qo.difficulty as string) : "Medium",
+              question: typeof qo.question === "string" ? qo.question.trim() : "",
+            };
+          })
+          .filter((q) => q.question.length > 0),
+      };
+    })
+    .filter((s) => s.questions.length > 0);
+  const total = skills.reduce((n, s) => n + s.questions.length, 0);
+  return { kind: "jd_question_bank", skills, notesUsed: notes?.trim() || "", total, generatedAt: new Date().toISOString() };
+}
+
 export async function assistRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
 
