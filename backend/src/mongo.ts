@@ -68,11 +68,15 @@ export const collections = {
 
   // ── Interview-Assist owned (writeable) ──────────────────────────────
   interviews:           () => col("ia_interviews"),
+  // Cached, versioned, skill-wise question bank per demand (OL jobPosting id).
+  // Keyed by `demandId` so it's generated once per JD and reused across calls.
+  questionBanks:        () => col("ia_question_banks"),
 };
 
-// Indexes for the single IA collection — idempotent.
+// Indexes for the IA collections — idempotent.
 // Lookups against OL collections rely on the indexes OL already creates.
 export async function ensureIndexes(): Promise<void> {
   await collections.interviews().createIndex({ id: 1 }, { unique: true });
   await collections.interviews().createIndex({ recruiterUid: 1, startedAt: -1 });
+  await collections.questionBanks().createIndex({ demandId: 1 }, { unique: true });
 }

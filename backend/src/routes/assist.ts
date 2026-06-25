@@ -268,6 +268,104 @@ const historySchema = z.array(
   }),
 );
 
+// --- JD-specific, SKILL-WISE question bank (generated once per demand) -------
+const BANK_MIN_QUESTIONS = 30;
+const BANK_SYSTEM = `You are an expert technical interviewer building a reusable QUESTION BANK for a specific JOB DESCRIPTION. The bank is organised SKILL-WISE: grouped by the distinct skills/areas the JD requires.
+
+STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
+
+STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that probe real hands-on depth in THAT skill — name the exact configuration object, process step, or scenario. Each question is 1–2 sentences (a brief concrete scenario then a precise ask) that only someone who has actually done the work could answer well. NO generic questions ("tell me about your experience", "what are your strengths", "are you familiar with X"). NO duplicates or near-duplicates. Mix difficulties within each skill and tag each: "Easy" (fundamentals), "Medium" (applied configuration/usage, trade-offs), "Hard" (complex scenarios, integration/debugging, performance, edge cases).
+
+GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
+
+EMPHASIS: If the recruiter provided EMPHASIS NOTES or ADDITIONAL JD POINTS, weight the bank accordingly — give those skills MORE questions and HARDER ones, and put them first.
+
+SIZE — STRICT: Produce AT LEAST ${BANK_MIN_QUESTIONS} questions total. NEVER fewer than ${BANK_MIN_QUESTIONS}. If the JD names only a few skills, go DEEPER on each (more Easy/Medium/Hard per skill) and include the closely-related fundamentals the role genuinely requires, until you reach at least ${BANK_MIN_QUESTIONS} quality questions. Roughly 4–8 per skill.
+
+All output text MUST be in English.
+
+Respond ONLY as JSON with this exact shape:
+{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "question": str}, ...]}, ...]}`;
+
+export interface JdQuestionBank {
+  kind: "jd_question_bank";
+  skills: Array<{ skill: string; questions: Array<{ difficulty: string; question: string }> }>;
+  notesUsed: string;
+  total: number;
+  generatedAt: string;
+}
+type BankSkillGroup = JdQuestionBank["skills"][number];
+
+function parseBankSkills(result: Record<string, unknown>): BankSkillGroup[] {
+  const rawSkills = Array.isArray(result.skills) ? (result.skills as unknown[]) : [];
+  return rawSkills
+    .map((s) => {
+      const o = s as { skill?: unknown; questions?: unknown };
+      const qs = Array.isArray(o.questions) ? (o.questions as unknown[]) : [];
+      return {
+        skill: typeof o.skill === "string" ? o.skill : "General",
+        questions: qs
+          .map((q) => {
+            const qo = q as { difficulty?: unknown; question?: unknown };
+            return {
+              difficulty: ["Easy", "Medium", "Hard"].includes(qo.difficulty as string) ? (qo.difficulty as string) : "Medium",
+              question: typeof qo.question === "string" ? qo.question.trim() : "",
+            };
+          })
+          .filter((q) => q.question.length > 0),
+      };
+    })
+    .filter((s) => s.questions.length > 0);
+}
+
+const normQ = (q: string) => q.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function mergeBankSkills(base: BankSkillGroup[], extra: BankSkillGroup[]): BankSkillGroup[] {
+  const seen = new Set(base.flatMap((s) => s.questions.map((q) => normQ(q.question))));
+  const out = base.map((s) => ({ skill: s.skill, questions: [...s.questions] }));
+  for (const g of extra) {
+    const fresh = g.questions.filter((q) => !seen.has(normQ(q.question)));
+    fresh.forEach((q) => seen.add(normQ(q.question)));
+    if (fresh.length === 0) continue;
+    const existing = out.find((s) => normQ(s.skill) === normQ(g.skill));
+    if (existing) existing.questions.push(...fresh);
+    else out.push({ skill: g.skill, questions: fresh });
+  }
+  return out;
+}
+const countBankQ = (skills: BankSkillGroup[]) => skills.reduce((n, s) => n + s.questions.length, 0);
+
+/**
+ * Generate a skill-wise question bank for a JD (+ optional emphasis notes).
+ * Guarantees AT LEAST 30 questions by topping up (up to 2 extra rounds) without
+ * duplicating questions.
+ */
+export async function generateJdQuestionBank(
+  jd: string,
+  notes: string,
+  track: { orgId: string; operation: string; callId?: string | null },
+): Promise<JdQuestionBank> {
+  const baseUser = `JOB DESCRIPTION:\n${jd || "(none provided)"}\n\nEMPHASIS NOTES / ADDITIONAL JD POINTS (weight these too):\n${notes?.trim() || "(none)"}`;
+  let skills = parseBankSkills(await gptJson(BANK_SYSTEM, baseUser, track));
+
+  for (let round = 0; round < 2 && countBankQ(skills) < BANK_MIN_QUESTIONS; round++) {
+    const need = BANK_MIN_QUESTIONS - countBankQ(skills);
+    const have = skills.map((s) => `${s.skill}:\n${s.questions.map((q) => `- ${q.question}`).join("\n")}`).join("\n\n");
+    const topUpUser = `${baseUser}\n\nQUESTIONS ALREADY WRITTEN (do NOT repeat or paraphrase these):\n${have}\n\nGenerate ${need} ADDITIONAL distinct, high-quality, JD-specific questions (deepen existing skills and/or add closely-related required skills). Same JSON shape.`;
+    const more = parseBankSkills(await gptJson(BANK_SYSTEM, topUpUser, track));
+    const merged = mergeBankSkills(skills, more);
+    if (countBankQ(merged) === countBankQ(skills)) break;
+    skills = merged;
+  }
+
+  return {
+    kind: "jd_question_bank",
+    skills,
+    notesUsed: notes?.trim() || "",
+    total: countBankQ(skills),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 export async function assistRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
 
