@@ -1,7 +1,7 @@
 // The structured interview-flow panel — replaces the old free-form suggestion
 // card. Always shows exactly ONE current question to ask, whether the last
 // answer was accepted, and the running Q&A history. No random generation.
-import { Check, SkipForward, RefreshCw, Flag, Mic, CircleHelp } from "lucide-react";
+import { Check, SkipForward, RefreshCw, Mic, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type {
   CurrentQuestion,
@@ -23,7 +23,6 @@ interface Props {
   onMarkAnswered: () => void;
   onSkip: () => void;
   onForceTick: () => void;
-  onEnd: () => void;
 }
 
 const VERDICT_PILL: Record<string, string> = {
@@ -34,7 +33,7 @@ const VERDICT_PILL: Record<string, string> = {
 
 export function InterviewFlowPanel({
   running, live, snapshot, current, history, latest, finalScore, status,
-  onMarkAnswered, onSkip, onForceTick, onEnd,
+  onMarkAnswered, onSkip, onForceTick,
 }: Props) {
   return (
     <div className="h-full bg-card border border-border rounded-lg flex flex-col min-h-0">
@@ -93,9 +92,6 @@ export function InterviewFlowPanel({
               </button>
               <button onClick={onSkip} className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border hover:bg-muted/50">
                 <SkipForward className="w-3.5 h-3.5" /> Skip
-              </button>
-              <button onClick={onEnd} className="ml-auto inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-destructive/40 text-destructive hover:bg-destructive/10">
-                <Flag className="w-3.5 h-3.5" /> End & score
               </button>
             </div>
           </div>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Library, Loader2, Mic, Sparkles, Plus } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { Library, Loader2, Mic, Sparkles, Plus, Download } from "lucide-react";
+import { apiFetch, downloadFile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -104,21 +104,45 @@ export function QuestionBankPanel({
     }
   }
 
+  // Download the selected version as a polished PDF (server-rendered).
+  const [downloadingBank, setDownloadingBank] = useState(false);
+  async function downloadBank() {
+    if (!demandId || !current) return;
+    setDownloadingBank(true);
+    try {
+      await downloadFile(
+        `/api/demands/${demandId}/question-bank/download?version=${current.version}`,
+        `question-bank-v${current.version}.pdf`,
+      );
+    } catch {
+      toast.error("Could not download the question bank.");
+    } finally {
+      setDownloadingBank(false);
+    }
+  }
+
   // When a JD is selected, the versioned skill-wise bank owns this panel.
   if (demandId) {
     return (
       <div className="flex flex-col min-h-0 h-full">
         <div className="px-4 py-2 border-b border-border bg-muted/30 shrink-0">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold truncate">
               Question bank · by skill{current?.bank?.total ? ` · ${current.bank.total} q` : ""}
             </span>
-            {versions.length > 0 && (
-              <button onClick={() => { setShowPrompt(true); setAddedText(""); }} disabled={busy}
-                className="inline-flex items-center gap-1 text-[11px] hover:text-foreground disabled:opacity-50">
-                <Plus className="w-3 h-3" /> New version
-              </button>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {current?.bank?.skills?.length ? (
+                <button onClick={downloadBank} disabled={downloadingBank} className="inline-flex items-center gap-1 text-[11px] hover:text-foreground disabled:opacity-50" title="Download as PDF">
+                  {downloadingBank ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />} PDF
+                </button>
+              ) : null}
+              {versions.length > 0 && (
+                <button onClick={() => { setShowPrompt(true); setAddedText(""); }} disabled={busy}
+                  className="inline-flex items-center gap-1 text-[11px] hover:text-foreground disabled:opacity-50">
+                  <Plus className="w-3 h-3" /> New version
+                </button>
+              )}
+            </div>
           </div>
           {versions.length > 1 && (
             <div className="flex flex-wrap items-center gap-1 mt-2">
@@ -139,6 +163,16 @@ export function QuestionBankPanel({
                   v{v.version}
                 </button>
               ))}
+              {current?.bank?.skills?.length ? (
+                <button
+                  onClick={downloadBank}
+                  disabled={downloadingBank}
+                  title="Download the selected version as PDF"
+                  className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  {downloadingBank ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />} PDF v{current.version}
+                </button>
+              ) : null}
             </div>
           )}
         </div>

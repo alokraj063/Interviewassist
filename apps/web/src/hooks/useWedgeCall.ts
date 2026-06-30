@@ -153,7 +153,23 @@ export function useWedgeCall() {
   }, [teardown]);
 
   const create = useCallback(async (input: CreateWedgeCallInput): Promise<WedgeCallTicket | null> => {
-    setState((s) => ({ ...s, status: "creating", errorMessage: null }));
+    // Fresh slate — a NEW call must never carry over the previous call's
+    // transcript, sentiment, or suggestions. (Scoring/flow is reset separately.)
+    setState((s) => ({
+      ...s,
+      status: "creating",
+      errorMessage: null,
+      callId: null,
+      turns: [],
+      partial: null,
+      bytesSent: 0,
+      startedAt: null,
+      sentiment: 50,
+      sentimentSeries: [],
+      suggestions: [],
+      citations: [],
+      liveRubric: null,
+    }));
     try {
       // Drive the live call with the recruiter's selected STT provider. The API
       // validates the provider's credentials and 503s with

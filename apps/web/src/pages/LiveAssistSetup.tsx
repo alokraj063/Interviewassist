@@ -41,6 +41,9 @@ import {
   UserPlus,
   FileText,
   Pencil,
+  Loader2,
+  Check,
+  Download,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -48,8 +51,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CreateCandidateModal, type CreateMode } from "@/components/CreateCandidateModal";
 import { toast } from "sonner";
+import { downloadFile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TranscriptPanel } from "@/components/live/TranscriptPanel";
 import { CandidateContext } from "@/components/live/CandidateContext";
@@ -91,6 +96,10 @@ export default function LiveAssistSetup() {
     open: false,
     mode: "manual",
   });
+  // Post-call evaluation popup: opens on End call, shows "Evaluating…" while the
+  // score generates, then the score + reasoning + per-question answers.
+  const [scoreModalOpen, setScoreModalOpen] = useState(false);
+  const [evaluating, setEvaluating] = useState(false);
 
   // Show all org demands (not just assignedToMe) so jobs added in Settings are
   // immediately selectable here, regardless of assignment.
@@ -131,6 +140,11 @@ export default function LiveAssistSetup() {
       toast.error("Pick a prospect or candidate.");
       return;
     }
+    // Clean slate: a new call must NOT continue the previous one. Clear the
+    // interview flow (scoring + Q&A history) and any open evaluation; the wedge
+    // clears its own transcript on create().
+    flow.reset();
+    setScoreModalOpen(false);
     const t = await wedge.create({
       demandId,
       prospectId: prospectId ?? undefined,
@@ -149,12 +163,17 @@ export default function LiveAssistSetup() {
   }
 
   async function handleEnd() {
-    // Stop the audio capture, then generate the interview-flow final score
-    // (verdict + dimension scores + summary) and show it in the panel. We do
-    // NOT navigate to the legacy Call Detail — its Summary/Rubric tabs depend
-    // on post-call workers that aren't wired yet, so they'd spin forever.
-    await wedge.end();
-    void flow.endNow();
+    // Ending the call IS the scoring action now (no separate "End & score").
+    // Open the evaluation popup immediately (shows "Evaluating…"), stop audio
+    // capture, then generate the final score — the modal swaps to the result.
+    setScoreModalOpen(true);
+    setEvaluating(true);
+    try {
+      await wedge.end();
+      await flow.endNow();
+    } finally {
+      setEvaluating(false);
+    }
   }
 
   const wedgeStatus = wedge.state.status;
@@ -352,7 +371,6 @@ export default function LiveAssistSetup() {
               onMarkAnswered={flow.markAnswered}
               onSkip={flow.skip}
               onForceTick={flow.forceTick}
-              onEnd={flow.endNow}
             />
           </div>
           <div className="col-span-12 xl:col-span-5 row-span-4 min-h-0">
@@ -384,7 +402,157 @@ export default function LiveAssistSetup() {
           setCreateModal((s) => ({ ...s, open: false }));
         }}
       />
+
+      <EvaluationModal
+        open={scoreModalOpen}
+        evaluating={evaluating}
+        finalScore={flow.finalScore}
+        history={flow.history}
+        statusText={flow.status.text}
+        callId={sourceCallId}
+        onClose={() => setScoreModalOpen(false)}
+      />
     </div>
+  );
+}
+
+/* --------------------- Post-call evaluation popup --------------------- */
+
+function EvaluationModal({
+  open,
+  evaluating,
+  finalScore,
+  history,
+  statusText,
+  callId,
+  onClose,
+}: {
+  open: boolean;
+  evaluating: boolean;
+  finalScore: ReturnType<typeof useInterviewFlow>["finalScore"];
+  history: ReturnType<typeof useInterviewFlow>["history"];
+  statusText: string;
+  callId: string | null;
+  onClose: () => void;
+}) {
+  const dims = ["communication", "relevance", "depth", "skills_match"] as const;
+  const [downloading, setDownloading] = useState(false);
+  async function downloadReport() {
+    if (!callId) return;
+    setDownloading(true);
+    try {
+      await downloadFile(`/api/calls/${callId}/report`, "interview-report.pdf");
+    } catch {
+      toast.error("Could not download the report.");
+    } finally {
+      setDownloading(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Interview evaluation</DialogTitle>
+        </DialogHeader>
+
+        {evaluating || !finalScore ? (
+          <div className="py-10 flex flex-col items-center justify-center gap-3 text-center">
+            {evaluating ? (
+              <>
+                <Loader2 className="w-7 h-7 animate-spin text-primary" />
+                <div className="text-sm font-medium">Evaluating — generating the score…</div>
+                <p className="text-xs text-muted-foreground">Reviewing the full conversation and scoring the candidate.</p>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">{statusText || "No score was generated for this call."}</p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Headline score */}
+            <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 p-3">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted-foreground">Verdict</div>
+                <div className="text-lg font-semibold">{finalScore.verdict}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs uppercase tracking-wide text-muted-foreground">Overall</div>
+                <div className="text-3xl font-bold tabular-nums">{finalScore.score.overall ?? "—"}</div>
+              </div>
+            </div>
+
+            {finalScore.saved && (
+              <div className="text-[11px] text-emerald-600 inline-flex items-center gap-1">
+                <Check className="w-3 h-3" /> Saved to the call record
+              </div>
+            )}
+
+            {/* Dimension scores */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {dims.map((k) => (
+                <div key={k} className="rounded-md border border-border p-2 text-center">
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground capitalize">{k.replace("_", " ")}</div>
+                  <div className="text-xl font-bold tabular-nums">{finalScore.score[k] ?? "—"}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Reasoning */}
+            {finalScore.summary && <p className="text-sm leading-relaxed">{finalScore.summary}</p>}
+            {finalScore.strengths?.length > 0 && (
+              <div className="text-sm">
+                <span className="font-medium text-emerald-700">Strengths: </span>
+                <span className="text-muted-foreground">{finalScore.strengths.join(" · ")}</span>
+              </div>
+            )}
+            {finalScore.concerns?.length > 0 && (
+              <div className="text-sm">
+                <span className="font-medium text-amber-700">Concerns: </span>
+                <span className="text-muted-foreground">{finalScore.concerns.join(" · ")}</span>
+              </div>
+            )}
+
+            {/* Per-question answers + reasoning */}
+            {history.length > 0 && (
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1.5">Questions &amp; answers</div>
+                <div className="space-y-2">
+                  {history.map((h, i) => (
+                    <div key={i} className="rounded-md border border-border p-2.5 text-sm">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{h.category}</span>
+                        <span className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded font-medium",
+                          h.verdict === "Skipped" ? "bg-muted text-muted-foreground"
+                            : /strong|adequate|manually/i.test(h.verdict) ? "bg-emerald-50 text-emerald-700"
+                              : "bg-amber-50 text-amber-700",
+                        )}>{h.verdict}</span>
+                      </div>
+                      <p className="font-medium leading-snug">{h.question}</p>
+                      {h.answer && <p className="text-muted-foreground mt-1">{h.answer}</p>}
+                      {h.feedback && <p className="text-xs italic text-muted-foreground/80 mt-1">{h.feedback}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end items-center gap-2 pt-1">
+              <button
+                onClick={downloadReport}
+                disabled={downloading || !callId}
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-md border border-border hover:bg-muted/50 disabled:opacity-50"
+              >
+                {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} Download report
+              </button>
+              <button onClick={onClose} className="text-sm font-medium px-4 py-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90">
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

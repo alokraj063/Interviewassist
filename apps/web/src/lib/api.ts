@@ -111,6 +111,27 @@ export async function apiFetch<T = unknown>(
   return body as T;
 }
 
+/** Fetch an authenticated binary endpoint (e.g. a PDF report) and save it as a file. */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const headers = new Headers();
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers, credentials: "include" });
+  if (!res.ok) {
+    let body: unknown = undefined;
+    try { body = await res.json(); } catch { /* non-JSON error */ }
+    throw makeError(res.status, body);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** Attempt a silent refresh once on app load. Returns the user payload on success. */
 export async function silentRefresh(): Promise<{ user: unknown; accessToken: string } | null> {
   try {

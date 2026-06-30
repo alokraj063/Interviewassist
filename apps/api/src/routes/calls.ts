@@ -13,6 +13,7 @@ import {
   CALL_MODES,
   jdMatchRuns,
   candidates,
+  candidateResumes,
   clients,
   db,
   demands,
@@ -24,10 +25,12 @@ import {
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { TranscriptTurn, TranslationConfig } from "@j2w/shared-types";
 import {
+  blobStore,
   getCallSummaryQueue,
   getPostDiarizeQueue,
   getTechnicalQaExtractQueue,
 } from "@j2w/ingest-shared";
+import { buildInterviewReport, type InterviewEval } from "../reports/interviewReport.js";
 import { z } from "zod";
 import { bus } from "../bus.js";
 import { env } from "../env.js";
@@ -913,6 +916,49 @@ export async function callsRoutes(app: FastifyInstance) {
       recruiter: recruiter ?? null,
       transcript: turns,
     };
+  });
+
+  // Download the interview REPORT (PDF): the evaluation page(s) followed by the
+  // candidate's résumé (the résumé PDF merged in, or its text rendered).
+  app.get<{ Params: { id: string } }>("/:id/report", { preHandler: [app.requirePermission("calls.read")] }, async (req, reply) => {
+    const ctx = req.authUser!;
+    const { id } = req.params;
+    const [call] = await db
+      .select({ summary: callSessions.summary, candidateId: callSessions.candidateId })
+      .from(callSessions)
+      .where(and(eq(callSessions.id, id), eq(callSessions.orgId, ctx.orgId)));
+    if (!call) return reply.code(404).send({ error: "call_not_found" });
+
+    const ev =
+      call.summary && typeof call.summary === "object" && (call.summary as { kind?: string }).kind === "interview_eval"
+        ? (call.summary as InterviewEval)
+        : null;
+    if (!ev) return reply.code(409).send({ error: "no_evaluation", message: "This call has no saved evaluation yet." });
+
+    // Latest résumé for the call's candidate, if any.
+    let resume: { buf: Buffer; mime?: string | null; filename?: string | null } | null = null;
+    if (call.candidateId) {
+      const [r] = await db
+        .select({ blobKey: candidateResumes.blobKey, mime: candidateResumes.mime, filename: candidateResumes.originalFilename })
+        .from(candidateResumes)
+        .where(eq(candidateResumes.candidateId, call.candidateId))
+        .orderBy(desc(candidateResumes.createdAt))
+        .limit(1);
+      if (r?.blobKey) {
+        try {
+          resume = { buf: await blobStore.get(r.blobKey), mime: r.mime, filename: r.filename };
+        } catch {
+          resume = null; // résumé blob missing — still produce the eval-only report
+        }
+      }
+    }
+
+    const pdf = await buildInterviewReport(ev, resume);
+    const slug = (ev.candidateName || "candidate").replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
+    return reply
+      .header("Content-Type", "application/pdf")
+      .header("Content-Disposition", `attachment; filename="interview-report-${slug || "candidate"}.pdf"`)
+      .send(Buffer.from(pdf));
   });
 
   // Used by the web supervisor view — list the org's queued + active calls

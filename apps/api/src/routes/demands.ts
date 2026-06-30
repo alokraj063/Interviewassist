@@ -16,6 +16,7 @@ import { z } from "zod";
 import { parseDocument } from "@j2w/ingest-shared";
 import { env } from "../env.js";
 import { generateJdQuestionBank } from "./assist.js";
+import { buildQuestionBankReport, type QuestionBank } from "../reports/questionBankReport.js";
 import {
   candidates,
   clients,
@@ -509,6 +510,46 @@ export async function demandsRoutes(app: FastifyInstance) {
       .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
 
     return { ok: true, created: true, version: nextVersion, versions: newVersions, assessmentNotes: row.assessmentNotes ?? "" };
+  });
+
+  // Download a question-bank version as a polished PDF (?version=N, default latest).
+  app.get("/:id/question-bank/download", { preHandler: [app.requirePermission("demands.read")] }, async (req, reply) => {
+    const ctx = req.authUser!;
+    const { id } = req.params as { id: string };
+    const q = req.query as { version?: string };
+    const [row] = await db
+      .select({
+        title: demands.title,
+        clientId: demands.clientId,
+        bank: demands.questionBank,
+        generatedAt: demands.questionBankGeneratedAt,
+      })
+      .from(demands)
+      .where(and(eq(demands.id, id), eq(demands.orgId, ctx.orgId)));
+    if (!row) return reply.code(404).send({ error: "demand_not_found" });
+
+    const versions = toVersions(row.bank, row.generatedAt);
+    if (versions.length === 0) return reply.code(409).send({ error: "no_question_bank" });
+    const wanted = Number(q.version);
+    const chosen = versions.find((v) => v.version === wanted) ?? versions[versions.length - 1];
+
+    let client: string | null = null;
+    if (row.clientId) {
+      const [c] = await db.select({ name: clients.companyName }).from(clients).where(eq(clients.id, row.clientId));
+      client = c?.name ?? null;
+    }
+
+    const pdf = await buildQuestionBankReport(chosen.bank as QuestionBank, {
+      title: row.title,
+      client,
+      version: chosen.version,
+      addedJd: chosen.addedJd,
+    });
+    const slug = (row.title || "question-bank").replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
+    return reply
+      .header("Content-Type", "application/pdf")
+      .header("Content-Disposition", `attachment; filename="question-bank-${slug || "jd"}-v${chosen.version}.pdf"`)
+      .send(Buffer.from(pdf));
   });
 
   // ---------- ASSIGN RECRUITERS ----------

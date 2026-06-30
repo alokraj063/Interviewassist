@@ -5,8 +5,9 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ArrowLeft, RefreshCw, FileText, X, MessageSquare } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { ArrowLeft, RefreshCw, FileText, X, MessageSquare, Download, Loader2 } from "lucide-react";
+import { toast } from "sonner";
+import { apiFetch, downloadFile } from "@/lib/api";
 
 interface CallRow {
   id: string;
@@ -56,6 +57,18 @@ const VERDICT_TONE: Record<string, string> = {
 export default function LiveAssistHistory() {
   const [onlyScored, setOnlyScored] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [dlId, setDlId] = useState<string | null>(null);
+
+  async function downloadReport(id: string) {
+    setDlId(id);
+    try {
+      await downloadFile(`/api/calls/${id}/report`, "interview-report.pdf");
+    } catch {
+      toast.error("Could not download the report.");
+    } finally {
+      setDlId(null);
+    }
+  }
 
   const { data, isLoading, refetch, isFetching } = useQuery<{ calls: CallRow[] }>({
     queryKey: ["calls", "history", onlyScored],
@@ -93,18 +106,14 @@ export default function LiveAssistHistory() {
       ) : (
         <div className="rounded-lg border border-border bg-card divide-y divide-border">
           {calls.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setOpenId(c.id)}
-              className="w-full text-left px-4 py-3 hover:bg-muted/40 flex items-center gap-3"
-            >
-              <div className="min-w-0 flex-1">
+            <div key={c.id} className="px-4 py-3 hover:bg-muted/40 flex items-center gap-3">
+              <button onClick={() => setOpenId(c.id)} className="min-w-0 flex-1 text-left">
                 <div className="text-sm font-medium truncate">{c.label}</div>
                 <div className="text-xs text-muted-foreground truncate">
                   {c.demandTitle ? `${c.demandTitle} · ` : ""}{fmtDate(c.startedAt)} · {fmtDur(c.startedAt, c.endedAt)}
                 </div>
                 {c.summaryText && <div className="text-xs text-muted-foreground/80 truncate mt-0.5">{c.summaryText}</div>}
-              </div>
+              </button>
               {c.hasEvaluation ? (
                 <div className="flex items-center gap-2 shrink-0">
                   {c.overallScore != null && (
@@ -113,11 +122,20 @@ export default function LiveAssistHistory() {
                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${VERDICT_TONE[c.verdict ?? ""] ?? "bg-muted text-muted-foreground border-border"}`}>
                     {c.verdict ?? "—"}
                   </span>
+                  <button
+                    onClick={() => downloadReport(c.id)}
+                    disabled={dlId === c.id}
+                    title="Download report (score + résumé)"
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-border hover:bg-muted/60 disabled:opacity-50"
+                  >
+                    {dlId === c.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                    Report
+                  </button>
                 </div>
               ) : (
                 <span className="text-[11px] px-2 py-0.5 rounded-full border border-border text-muted-foreground shrink-0">{c.status}</span>
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -134,13 +152,35 @@ function CallDetailDrawer({ callId, onClose }: { callId: string; onClose: () => 
   });
   const ev = data?.call.summary && (data.call.summary as { kind?: string }).kind === "interview_eval" ? (data.call.summary as Evaluation) : null;
   const transcript = data?.transcript ?? [];
+  const [downloading, setDownloading] = useState(false);
+  async function downloadReport() {
+    setDownloading(true);
+    try {
+      await downloadFile(`/api/calls/${callId}/report`, "interview-report.pdf");
+    } catch {
+      toast.error("Could not download the report.");
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40" onClick={onClose}>
       <div className="w-full max-w-xl h-full bg-background border-l border-border overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="sticky top-0 bg-background border-b border-border px-5 py-3 flex items-center justify-between">
           <div className="font-semibold text-sm">{ev?.candidateName || "Call detail"}</div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+          <div className="flex items-center gap-2">
+            {ev && (
+              <button
+                onClick={downloadReport}
+                disabled={downloading}
+                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-md border border-border hover:bg-muted/50 disabled:opacity-50"
+              >
+                {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Report
+              </button>
+            )}
+            <button onClick={onClose} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4" /></button>
+          </div>
         </div>
 
         {isLoading ? (
