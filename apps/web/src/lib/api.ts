@@ -113,9 +113,20 @@ export async function apiFetch<T = unknown>(
 
 /** Fetch an authenticated binary endpoint (e.g. a PDF report) and save it as a file. */
 export async function downloadFile(path: string, filename: string): Promise<void> {
-  const headers = new Headers();
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
-  const res = await fetch(`${API_BASE}${path}`, { headers, credentials: "include" });
+  const doFetch = () => {
+    const headers = new Headers();
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+    return fetch(`${API_BASE}${path}`, { headers, credentials: "include" });
+  };
+
+  let res = await doFetch();
+  // The in-memory access token can expire mid-session (e.g. during a long call);
+  // refresh once and retry, like apiFetch does, before giving up.
+  if (res.status === 401) {
+    const ok = await refreshAccessToken();
+    if (ok) res = await doFetch();
+    else setAccessToken(null);
+  }
   if (!res.ok) {
     let body: unknown = undefined;
     try { body = await res.json(); } catch { /* non-JSON error */ }

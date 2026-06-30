@@ -31,6 +31,7 @@ import {
   getTechnicalQaExtractQueue,
 } from "@j2w/ingest-shared";
 import { buildInterviewReport, type InterviewEval } from "../reports/interviewReport.js";
+import { evaluateCallFromTranscript } from "./assist.js";
 import { z } from "zod";
 import { bus } from "../bus.js";
 import { env } from "../env.js";
@@ -929,11 +930,44 @@ export async function callsRoutes(app: FastifyInstance) {
       .where(and(eq(callSessions.id, id), eq(callSessions.orgId, ctx.orgId)));
     if (!call) return reply.code(404).send({ error: "call_not_found" });
 
-    const ev =
+    let ev =
       call.summary && typeof call.summary === "object" && (call.summary as { kind?: string }).kind === "interview_eval"
         ? (call.summary as InterviewEval)
         : null;
-    if (!ev) return reply.code(409).send({ error: "no_evaluation", message: "This call has no saved evaluation yet." });
+
+    // No saved evaluation → generate one from the transcript on the fly so a
+    // report is always available for a completed call, and cache it.
+    if (!ev) {
+      try {
+        const generated = await evaluateCallFromTranscript(id, ctx.orgId);
+        if (generated) {
+          ev = generated as InterviewEval;
+          try {
+            await db
+              .update(callSessions)
+              .set({ summary: generated })
+              .where(and(eq(callSessions.id, id), eq(callSessions.orgId, ctx.orgId)));
+          } catch (err) {
+            req.log.warn({ err, callId: id }, "failed to cache generated evaluation");
+          }
+        }
+      } catch (err) {
+        req.log.warn({ err, callId: id }, "transcript evaluation failed");
+      }
+    }
+
+    // Still nothing (no transcript / scoring unavailable) → a minimal report so
+    // the download never fails.
+    if (!ev) {
+      ev = {
+        verdict: "Not scored",
+        score: {},
+        summary: "Not enough conversation was captured on this call to generate a score.",
+        strengths: [],
+        concerns: [],
+        questions: [],
+      } as InterviewEval;
+    }
 
     // Latest résumé for the call's candidate, if any.
     let resume: { buf: Buffer; mime?: string | null; filename?: string | null } | null = null;

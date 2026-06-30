@@ -17,7 +17,7 @@
 // Everything the co-pilot emits is in ENGLISH by design (recruiter-facing),
 // regardless of the language the candidate speaks on the call.
 import OpenAI from "openai";
-import { eq } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -26,6 +26,7 @@ import {
   clients as clientsTable,
   db,
   demands as demandsTable,
+  transcriptTurns,
 } from "@j2w/db";
 import { chatModel, env } from "../env.js";
 import { recordUsage, usageSummary } from "../usage/tracker.js";
@@ -384,6 +385,74 @@ export async function generateJdQuestionBank(
     skills,
     notesUsed: notes?.trim() || "",
     total: countQ(skills),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+// --- Score a finished call from its raw transcript (when no live history was
+// captured) so a report is always available for a completed call. ------------
+const FINAL_FROM_TRANSCRIPT_SYSTEM = `You are a senior interview evaluator. You are given the JOB DESCRIPTION, the candidate profile/resume, and the FULL CALL TRANSCRIPT of a screening call.
+
+The call used a single mixed microphone, so speaker labels may be WRONG. Judge by CONTENT: the INTERVIEWER asks short probing questions; the CANDIDATE describes their own experience, skills, and decisions. Reconstruct the conversation from content, not labels.
+
+Do TWO things:
+(1) Reconstruct the interview as the key QUESTIONS the interviewer asked, each with the candidate's ANSWER (summarised from the transcript) and a short verdict.
+(2) Produce a calibrated FINAL evaluation. Be honest and grounded in what was actually said. If the call was very short or thin on substance, lower confidence, prefer "Borderline" or lower, and say so in the summary.
+
+Score each dimension 0-100: communication, relevance, depth, skills_match, overall (a hire recommendation, not just the average).
+
+All output MUST be in English. Respond ONLY as JSON with this exact shape:
+{"verdict": "Strong yes"|"Lean yes"|"Borderline"|"Lean no"|"Strong no",
+ "score": {"overall": int, "communication": int, "relevance": int, "depth": int, "skills_match": int},
+ "summary": str (2-3 sentences),
+ "strengths": [up to 3],
+ "concerns": [up to 3],
+ "questions": [{"category": str, "question": str, "answer": str, "verdict": "Strong"|"Adequate"|"Weak"|"Off-topic"|"Vague"}]}`;
+
+export interface CallEvaluation {
+  kind: "interview_eval";
+  verdict: string;
+  score: Record<string, number>;
+  summary: string;
+  strengths: string[];
+  concerns: string[];
+  questions: Array<{ category?: string; question?: string; answer?: string; verdict?: string }>;
+  candidateName: string;
+  generatedAt: string;
+}
+
+/**
+ * Generate a full evaluation for a finished call straight from its stored
+ * transcript. Returns null only when there's nothing to score (no transcript).
+ */
+export async function evaluateCallFromTranscript(callId: string, orgId: string): Promise<CallEvaluation | null> {
+  if (!env.OPENAI_API_KEY) return null;
+  const ctx = await loadJdResume(callId, orgId);
+  if (!ctx) return null;
+
+  const turns = await db
+    .select({ speaker: transcriptTurns.speaker, text: transcriptTurns.text })
+    .from(transcriptTurns)
+    .where(eq(transcriptTurns.callId, callId))
+    .orderBy(asc(transcriptTurns.tsStartMs));
+  const transcript = turns
+    .map((t) => `${(t.speaker || "?").toUpperCase()}: ${(t.text || "").trim()}`)
+    .filter((l) => l.length > 3)
+    .join("\n")
+    .trim();
+  if (!transcript) return null;
+
+  const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL CALL TRANSCRIPT (labels may be imperfect — judge by content):\n${transcript}`;
+  const result = await gptJson(FINAL_FROM_TRANSCRIPT_SYSTEM, user, { orgId, operation: "final", callId });
+  return {
+    kind: "interview_eval",
+    verdict: (result.verdict as string) ?? "Borderline",
+    score: (result.score as Record<string, number>) ?? {},
+    summary: (result.summary as string) ?? "",
+    strengths: (result.strengths as string[]) ?? [],
+    concerns: (result.concerns as string[]) ?? [],
+    questions: (result.questions as CallEvaluation["questions"]) ?? [],
+    candidateName: ctx.candidateName,
     generatedAt: new Date().toISOString(),
   };
 }
