@@ -14,6 +14,7 @@ import { ObjectId } from "mongodb";
 import { collections } from "../mongo.js";
 import { env } from "../env.js";
 import { generateJdQuestionBank } from "./assist.js";
+import { buildQuestionBankReport, type QuestionBank } from "../reports/questionBankReport.js";
 
 interface OlJobPosting {
   _id: ObjectId;
@@ -248,6 +249,35 @@ export async function demandsRoutes(app: FastifyInstance) {
     );
 
     return { ok: true, created: true, version: nextVersion, versions: newVersions, assessmentNotes: existing?.assessmentNotes ?? "" };
+  });
+
+  // Download a question-bank version as a polished PDF (?version=N, default latest).
+  app.get<{ Params: { id: string }; Querystring: { version?: string } }>("/:id/question-bank/download", async (req, reply) => {
+    const job = await loadOwnedJob(req, reply, req.params.id);
+    if (!job) return;
+    const doc = await collections.questionBanks().findOne<QuestionBankDoc>({ demandId: req.params.id });
+    const versions = doc?.versions ?? [];
+    if (versions.length === 0) return reply.code(409).send({ error: "no_question_bank" });
+    const wanted = Number(req.query.version);
+    const chosen = versions.find((v) => v.version === wanted) ?? versions[versions.length - 1];
+
+    let client: string | null = null;
+    if (job.clientId) {
+      const c = await collections.olClients().findOne<OlClient>({ _id: job.clientId });
+      client = c?.companyName ?? null;
+    }
+
+    const pdf = await buildQuestionBankReport(chosen.bank as QuestionBank, {
+      title: job.title ?? null,
+      client,
+      version: chosen.version,
+      addedJd: chosen.addedJd,
+    });
+    const slug = (job.title || "question-bank").replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
+    return reply
+      .header("Content-Type", "application/pdf")
+      .header("Content-Disposition", `attachment; filename="question-bank-${slug || "jd"}-v${chosen.version}.pdf"`)
+      .send(Buffer.from(pdf));
   });
 
   // The legacy multi-tenant impl exposed prospects / submissions / parse-jd /

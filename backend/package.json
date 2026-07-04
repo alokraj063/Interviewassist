@@ -26,6 +26,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.3.0",
     "openai": "^4.60.0",
+    "pdf-lib": "^1.17.1",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
     "sentiment": "^5.0.2",

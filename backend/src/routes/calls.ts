@@ -21,8 +21,11 @@ import type { FastifyInstance } from "fastify";
 import { ObjectId } from "mongodb";
 import { z } from "zod";
 import { collections } from "../mongo.js";
+import { blobStore } from "@j2w/ingest-shared";
 import { env } from "../env.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
+import { buildInterviewReport, type InterviewEval } from "../reports/interviewReport.js";
+import { evaluateCallFromTranscript } from "./assist.js";
 
 const transcriptionChoiceSchema = z.object({
   provider: z.enum(["deepgram", "sarvam", "shunya"]).default("deepgram"),
@@ -221,12 +224,106 @@ export async function callsRoutes(app: FastifyInstance) {
   });
 
   app.get("/", async (req) => {
+    const q = req.query as { limit?: string; withEvaluation?: string };
+    const limit = Math.min(500, Math.max(1, Number(q.limit) || 100));
+    const onlyEval = q.withEvaluation === "true";
     const rows = await collections.interviews()
       .find({ recruiterUserId: req.authUser!.uid }, { projection: { _id: 0 } })
       .sort({ startedAt: -1 })
-      .limit(100)
+      .limit(limit)
       .toArray();
-    return { calls: rows };
+
+    // Surface a compact eval read (verdict + overall + summary) + a candidate/JD
+    // label on each row for the Past Calls list.
+    const calls = rows
+      .map((r) => {
+        const summary = r.summary as { kind?: string; verdict?: string; score?: { overall?: number }; summary?: string; candidateName?: string } | null;
+        const ev = summary && summary.kind === "interview_eval" ? summary : null;
+        const candName = (r.candidate as { name?: string } | null)?.name ?? null;
+        const demandTitle = (r.demandSnapshot as { title?: string } | null)?.title ?? null;
+        return {
+          id: r.id,
+          status: r.status,
+          mode: r.mode,
+          startedAt: r.startedAt,
+          endedAt: r.endedAt,
+          candidateRefOrPhone: r.candidateRefOrPhone ?? null,
+          recruiterName: r.recruiterName ?? null,
+          recruiterEmail: r.recruiterEmail ?? null,
+          demandTitle,
+          candidateName: candName,
+          hasEvaluation: !!ev,
+          verdict: ev?.verdict ?? null,
+          overallScore: ev?.score?.overall ?? null,
+          summaryText: ev?.summary ?? null,
+          label: candName || ev?.candidateName || r.candidateRefOrPhone || "Untitled call",
+        };
+      })
+      .filter((r) => (onlyEval ? r.hasEvaluation : true));
+
+    return { calls };
+  });
+
+  // ── Download the interview REPORT (PDF): evaluation page(s) + résumé ──────
+  // Generates the evaluation from the transcript on the fly when none was saved
+  // so a report is always available for a completed call, and caches it.
+  app.get<{ Params: { id: string } }>("/:id/report", async (req, reply) => {
+    const call = await collections.interviews().findOne<{
+      recruiterUserId: string;
+      summary?: unknown;
+      candidate?: { resumeBlobKey?: string; resumeMime?: string; resumeFilename?: string } | null;
+    }>({ id: req.params.id }, { projection: { _id: 0, recruiterUserId: 1, summary: 1, candidate: 1 } });
+    if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
+
+    let ev =
+      call.summary && typeof call.summary === "object" && (call.summary as { kind?: string }).kind === "interview_eval"
+        ? (call.summary as InterviewEval)
+        : null;
+
+    if (!ev) {
+      try {
+        const generated = await evaluateCallFromTranscript(req.params.id, req.authUser!.uid);
+        if (generated) {
+          ev = generated as InterviewEval;
+          try {
+            await collections.interviews().updateOne({ id: req.params.id }, { $set: { summary: generated } });
+          } catch (err) {
+            req.log.warn({ err, callId: req.params.id }, "failed to cache generated evaluation");
+          }
+        }
+      } catch (err) {
+        req.log.warn({ err, callId: req.params.id }, "transcript evaluation failed");
+      }
+    }
+
+    if (!ev) {
+      ev = {
+        verdict: "Not scored",
+        score: {},
+        summary: "Not enough conversation was captured on this call to generate a score.",
+        strengths: [],
+        concerns: [],
+        questions: [],
+      } as InterviewEval;
+    }
+
+    // Résumé (stored as a blob at call-start) — appended after the eval pages.
+    let resume: { buf: Buffer; mime?: string | null; filename?: string | null } | null = null;
+    const rk = call.candidate?.resumeBlobKey;
+    if (rk) {
+      try {
+        resume = { buf: await blobStore.get(rk), mime: call.candidate?.resumeMime ?? null, filename: call.candidate?.resumeFilename ?? null };
+      } catch {
+        resume = null;
+      }
+    }
+
+    const pdf = await buildInterviewReport(ev, resume);
+    const slug = (ev.candidateName || "candidate").replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
+    return reply
+      .header("Content-Type", "application/pdf")
+      .header("Content-Disposition", `attachment; filename="interview-report-${slug || "candidate"}.pdf"`)
+      .send(Buffer.from(pdf));
   });
 
   // ── Recording playback (auth WAV stream) ────────────────────────────

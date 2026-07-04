@@ -76,6 +76,12 @@ const schema = z.object({
   AWS_REKOGNITION_ACCESS_KEY_ID: z.string().optional(),
   AWS_REKOGNITION_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REKOGNITION_REGION: z.string().default("ap-south-1"),
+  // --- S3 blob storage (résumés etc. stored under the interview-assist/ prefix) ---
+  // When set, blobStore reads/writes the S3 bucket instead of the local FS.
+  AWS_S3_ACCESS_KEY: z.string().optional(),
+  AWS_S3_SECRET_KEY: z.string().optional(),
+  AWS_REGION: z.string().optional(),
+  AWS_BUCKET_NAME: z.string().optional(),
   // --- Proctor cockpit: live webcam/screen feeds (LiveKit) ---
   // When PROCTOR_STREAM_PROVIDER=none (default) the cockpit runs in snapshot
   // mode (renders evidence_blob_key stills). Set to 'livekit' + keys to mint
