@@ -65,6 +65,10 @@ export const collections = {
   olJobPostings:        () => col("jobPostings"),
   olJobAssignMappings:  () => col("jobAssignMappings"),
   olClients:            () => col("clients"),
+  // Candidate-side OL data — used to source existing candidates + their
+  // résumés when the recruiter searches the OfferLetter pool.
+  olCandidateProfiles:  () => col("candidateProfiles"),
+  olCandidateDocuments: () => col("candidateDocuments"),
 
   // ── Interview-Assist owned (writeable) ──────────────────────────────
   interviews:           () => col("ia_interviews"),

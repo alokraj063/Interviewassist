@@ -82,6 +82,13 @@ const schema = z.object({
   AWS_S3_SECRET_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
   AWS_BUCKET_NAME: z.string().optional(),
+  // Bucket that holds the OfferLetter candidate résumés. Defaults to
+  // AWS_BUCKET_NAME when OL shares the same bucket (different prefix).
+  OFFER_LETTER_S3_BUCKET: z.string().optional(),
+  // Key prefix under which OL stores candidate documents — résumés live at
+  // `<prefix>candidate_documents/<uid>/resume/<file>`. From the OL app's
+  // AWS_S3_BUCKET_URL path (e.g. "offerletter-2026/development/").
+  OFFER_LETTER_S3_PREFIX: z.string().default(""),
   // --- Proctor cockpit: live webcam/screen feeds (LiveKit) ---
   // When PROCTOR_STREAM_PROVIDER=none (default) the cockpit runs in snapshot
   // mode (renders evidence_blob_key stills). Set to 'livekit' + keys to mint
