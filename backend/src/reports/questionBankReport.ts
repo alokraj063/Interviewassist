@@ -4,7 +4,7 @@
 import { Pdf, C, M, PAGE, toneFor } from "./pdfKit.js";
 
 export interface QuestionBank {
-  skills?: Array<{ skill?: string; questions?: Array<{ difficulty?: string; question?: string }> }>;
+  skills?: Array<{ skill?: string; questions?: Array<{ difficulty?: string; question?: string; answer?: string }> }>;
   total?: number;
 }
 
@@ -33,9 +33,10 @@ export async function buildQuestionBankReport(
     skillHeader(pdf, group.skill ?? "General", group.questions?.length ?? 0);
     for (const q of group.questions ?? []) {
       n++;
-      pdf.ensure(34);
+      pdf.ensure(q.answer ? 46 : 34);
       const cw = pdf.chip(M, pdf.y, q.difficulty ?? "Medium", toneFor(q.difficulty));
-      pdf.text(`${n}.  ${q.question ?? ""}`, { indent: cw + 10, size: 10.5, gap: 9 });
+      pdf.text(`${n}.  ${q.question ?? ""}`, { indent: cw + 10, size: 10.5, gap: q.answer ? 3 : 9 });
+      if (q.answer) pdf.text(`Expected: ${q.answer}`, { indent: cw + 10, size: 9, color: C.muted, gap: 9 });
     }
     pdf.gap(6);
   }

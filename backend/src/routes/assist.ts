@@ -274,9 +274,13 @@ const BANK_SYSTEM = `You are an expert technical interviewer building a reusable
 
 STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
 
-STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that probe real hands-on depth in THAT skill — name the exact configuration object, process step, or scenario. Each question is 1–2 sentences (a brief concrete scenario then a precise ask) that only someone who has actually done the work could answer well. NO generic questions ("tell me about your experience", "what are your strengths", "are you familiar with X"). NO duplicates or near-duplicates. Mix difficulties within each skill and tag each: "Easy" (fundamentals), "Medium" (applied configuration/usage, trade-offs), "Hard" (complex scenarios, integration/debugging, performance, edge cases).
+STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that probe real hands-on depth in THAT skill — name the exact configuration object, process step, or scenario. Each question is 1–2 sentences (a brief concrete scenario then a precise ask) that only someone who has actually done the work could answer well. NO generic questions ("tell me about your experience", "what are your strengths", "are you familiar with X"). NO yes/no questions and NO duplicates or near-duplicates. Mix difficulties within each skill and tag each: "Easy" (fundamentals), "Medium" (applied configuration/usage, trade-offs), "Hard" (complex scenarios, integration/debugging, performance, edge cases).
 
-GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
+QUALITY BAR — each question must: (a) target ONE concrete competency an interviewer can score; (b) be answerable verbally in under ~2 minutes (not an essay); (c) invite a "how/why/walk me through" explanation, not recall of a definition; (d) use precise domain terminology from the JD. Prefer real scenarios ("A GR posts to the wrong valuation class — how do you find and fix it?") over abstract prompts ("explain valuation classes").
+
+ANSWER KEY (SHORT KEYWORDS): For EACH question also provide "answer" — the KEY POINTS a strong candidate MUST mention, written as 3–6 short comma-separated keywords/phrases the interviewer can scan while listening. It is a cheat-sheet, NOT prose: no full sentences, ≤ 15 words total. Example → question about a goods issue to a cost center, answer: "MIGO, movement type 201, cost center, reservation, GL auto-posting".
+
+GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name (in questions AND answers) MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
 
 EMPHASIS: If the recruiter provided EMPHASIS NOTES or ADDITIONAL JD POINTS, weight the bank accordingly — give those skills MORE questions and HARDER ones, and put them first.
 
@@ -285,11 +289,11 @@ SIZE — STRICT: Produce AT LEAST ${BANK_MIN_QUESTIONS} questions total. NEVER f
 All output text MUST be in English.
 
 Respond ONLY as JSON with this exact shape:
-{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "question": str}, ...]}, ...]}`;
+{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "question": str, "answer": str}, ...]}, ...]}`;
 
 export interface JdQuestionBank {
   kind: "jd_question_bank";
-  skills: Array<{ skill: string; questions: Array<{ difficulty: string; question: string }> }>;
+  skills: Array<{ skill: string; questions: Array<{ difficulty: string; question: string; answer?: string }> }>;
   notesUsed: string;
   total: number;
   generatedAt: string;
@@ -306,10 +310,11 @@ function parseBankSkills(result: Record<string, unknown>): BankSkillGroup[] {
         skill: typeof o.skill === "string" ? o.skill : "General",
         questions: qs
           .map((q) => {
-            const qo = q as { difficulty?: unknown; question?: unknown };
+            const qo = q as { difficulty?: unknown; question?: unknown; answer?: unknown };
             return {
               difficulty: ["Easy", "Medium", "Hard"].includes(qo.difficulty as string) ? (qo.difficulty as string) : "Medium",
               question: typeof qo.question === "string" ? qo.question.trim() : "",
+              answer: typeof qo.answer === "string" ? qo.answer.trim() : "",
             };
           })
           .filter((q) => q.question.length > 0),
