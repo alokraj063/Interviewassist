@@ -19,7 +19,6 @@
 //   - Persist final recording_url, durationMs
 //   - Close the Deepgram session
 
-import path from "node:path";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { collections } from "../mongo.js";
@@ -36,17 +35,27 @@ import {
 import type { TranscriptionLanguage } from "../transcription/provider.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
 import { recordAudioUsage } from "../usage/tracker.js";
-import { WavDumper } from "./wav-dump.js";
+import { blobStore } from "@j2w/ingest-shared";
 import { authenticateOl } from "../auth/olAuth.js";
 
-const DUMP_WAVS = process.env.DUMP_WAVS !== "0"; // default ON for the wedge — needed for post_diarize.
-const DUMP_DIR = path.resolve(process.env.DUMP_DIR ?? "./var/audio-dumps");
+// Wrap accumulated linear16 16kHz mono PCM in a WAV container for storage.
+function pcmToWav(pcm: Buffer): Buffer {
+  const SAMPLE_RATE = 16000, BITS = 16, CH = 1;
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0); h.writeUInt32LE(36 + pcm.length, 4); h.write("WAVE", 8);
+  h.write("fmt ", 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20);
+  h.writeUInt16LE(CH, 22); h.writeUInt32LE(SAMPLE_RATE, 24);
+  h.writeUInt32LE((SAMPLE_RATE * CH * BITS) / 8, 28); h.writeUInt16LE((CH * BITS) / 8, 32); h.writeUInt16LE(BITS, 34);
+  h.write("data", 36); h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
 
 interface IngestState {
   callId: string;
   userEmail: string;
   bytesSent: number;
   startedAt: number;
+  chunks: Buffer[];   // raw PCM frames — concatenated + uploaded to S3 on close
 }
 
 export async function registerIngestCallWs(app: FastifyInstance): Promise<void> {
@@ -105,30 +114,24 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
       userEmail: user.email,
       bytesSent: 0,
       startedAt: Date.now(),
+      chunks: [],
     };
     app.log.info({ callId, recruiter: user.uid, provider, model }, "ingest-call session open");
-    const dumper = DUMP_WAVS ? new WavDumper(callId, DUMP_DIR) : null;
 
     socket.on("message", (raw: Buffer, isBinary: boolean) => {
       if (!isBinary || !(raw instanceof Buffer) || raw.byteLength === 0) return;
       state.bytesSent += raw.byteLength;
       if (provider === "deepgram") writeSingleFrame(callId, raw, app.log);
       else writeSingleBridgeFrame(callId, raw);
-      // Dump as channel 0 (recruiter) — the post_diarize worker re-runs
-      // Deepgram with diarize=true on this WAV and uses the resulting
-      // diarization confidence to label retroactively.
-      dumper?.writeFrame(0, raw);
+      // Keep the raw PCM so we can store the full recording to S3 on close.
+      state.chunks.push(Buffer.from(raw));
     });
 
     socket.on("close", async () => {
-      dumper?.close();
       if (provider === "deepgram") await closeSingleStream(callId);
       else await closeSingleBridge(callId);
       const durationMs = Date.now() - state.startedAt;
-      app.log.info(
-        { callId, durationMs, bytesSent: state.bytesSent, dumpDir: DUMP_WAVS ? DUMP_DIR : null },
-        "ingest-call session closed",
-      );
+      app.log.info({ callId, durationMs, bytesSent: state.bytesSent }, "ingest-call session closed");
 
       // Usage tracker is a no-op now; left for parity with the old call site.
       const audioSeconds = state.bytesSent / 32000;
@@ -139,21 +142,23 @@ export async function registerIngestCallWs(app: FastifyInstance): Promise<void> 
         );
       }
 
-      // Persist recording_url + enqueue acoustic-sentiment job (single mixed
-      // source — see notes in workers/jobs/acousticSentiment.ts). We store a
-      // relative path under DUMP_DIR rather than a file:// URI so the auth
-      // playback endpoint (GET /api/calls/:id/recording) resolves the same
-      // value across api+worker containers regardless of where DUMP_DIR is
-      // mounted in each.
-      const recruiterRel = dumper?.relativePaths.recruiter ?? null;
-      if (recruiterRel) {
+      // Store the full call recording to S3 (via the blob store). We keep the
+      // returned content-addressed key on the call doc; the auth playback
+      // endpoint (GET /api/calls/:id/recording) fetches it back from the blob
+      // store, and the report merges nothing from it (audio only).
+      const pcm = Buffer.concat(state.chunks);
+      state.chunks = [];
+      if (pcm.length > 0) {
         try {
+          const wav = pcmToWav(pcm);
+          const { key } = await blobStore.put(wav);
           await collections.interviews().updateOne(
             { id: callId },
-            { $set: { recordingUrl: recruiterRel, recordingDurationMs: durationMs, recordingMime: "audio/wav" } },
+            { $set: { recordingUrl: key, recordingStore: "blob", recordingDurationMs: durationMs, recordingMime: "audio/wav" } },
           );
+          app.log.info({ callId, key, bytes: wav.length }, "recording stored to S3 (blob)");
         } catch (err) {
-          app.log.warn({ err, callId }, "post-call recording persist failed");
+          app.log.warn({ err, callId }, "post-call recording S3 upload failed");
         }
       }
     });

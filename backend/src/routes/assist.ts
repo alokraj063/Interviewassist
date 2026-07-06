@@ -418,8 +418,16 @@ export interface CallEvaluation {
   strengths: string[];
   concerns: string[];
   questions: Array<{ category?: string; question?: string; answer?: string; verdict?: string }>;
+  questionCount: number;   // total questions the interviewer asked
+  answeredCount: number;   // of those, how many the candidate actually answered
   candidateName: string;
   generatedAt: string;
+}
+
+// A question counts as "answered" when the candidate gave a substantive reply
+// (not off-topic / no-answer).
+function countAnswered(qs: CallEvaluation["questions"]): number {
+  return qs.filter((q) => (q.answer ?? "").trim().length > 0 && q.verdict !== "Off-topic").length;
 }
 
 /**
@@ -446,6 +454,7 @@ export async function evaluateCallFromTranscript(callId: string, uid: string): P
 
   const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL CALL TRANSCRIPT (labels may be imperfect — judge by content):\n${transcript}`;
   const result = await gptJson(FINAL_FROM_TRANSCRIPT_SYSTEM, user, { orgId: uid, operation: "final", callId });
+  const questions = (result.questions as CallEvaluation["questions"]) ?? [];
   return {
     kind: "interview_eval",
     verdict: (result.verdict as string) ?? "Borderline",
@@ -453,7 +462,9 @@ export async function evaluateCallFromTranscript(callId: string, uid: string): P
     summary: (result.summary as string) ?? "",
     strengths: (result.strengths as string[]) ?? [],
     concerns: (result.concerns as string[]) ?? [],
-    questions: (result.questions as CallEvaluation["questions"]) ?? [],
+    questions,
+    questionCount: questions.length,
+    answeredCount: countAnswered(questions),
     candidateName: ctx.candidateName,
     generatedAt: new Date().toISOString(),
   };

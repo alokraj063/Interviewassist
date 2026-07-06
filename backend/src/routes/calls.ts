@@ -192,6 +192,9 @@ export async function callsRoutes(app: FastifyInstance) {
   });
 
   // ── End ─────────────────────────────────────────────────────────────────
+  // Marks the call ended, then evaluates it straight from the transcript and
+  // caches the evaluation as `summary`. Returns the evaluation so the UI can
+  // show the report immediately (there is no live scoring loop any more).
   app.post<{ Params: { id: string } }>("/:id/end", async (req, reply) => {
     const call = await collections.interviews().findOne<{ recruiterUserId: string }>({ id: req.params.id });
     if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
@@ -199,7 +202,17 @@ export async function callsRoutes(app: FastifyInstance) {
       { id: req.params.id },
       { $set: { status: "ended", endedAt: new Date() } },
     );
-    return { ok: true };
+
+    let evaluation = null;
+    try {
+      evaluation = await evaluateCallFromTranscript(req.params.id, req.authUser!.uid);
+      if (evaluation) {
+        await collections.interviews().updateOne({ id: req.params.id }, { $set: { summary: evaluation } });
+      }
+    } catch (err) {
+      req.log.warn({ err, callId: req.params.id }, "post-call evaluation failed");
+    }
+    return { ok: true, evaluation };
   });
 
   // ── Context card (candidate + demand) used by the live call ──────────
@@ -328,9 +341,19 @@ export async function callsRoutes(app: FastifyInstance) {
 
   // ── Recording playback (auth WAV stream) ────────────────────────────
   app.get<{ Params: { id: string } }>("/:id/recording", async (req, reply) => {
-    const call = await collections.interviews().findOne<{ recruiterUserId: string; recordingUrl: string | null }>({ id: req.params.id });
+    const call = await collections.interviews().findOne<{ recruiterUserId: string; recordingUrl: string | null; recordingStore?: string | null }>({ id: req.params.id });
     if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
     if (!call.recordingUrl) return reply.code(404).send({ error: "no_recording" });
+    // S3 / blob-stored recording (new default) — fetch the WAV back from the blob store.
+    if (call.recordingStore === "blob") {
+      try {
+        const buf = await blobStore.get(call.recordingUrl);
+        return reply.header("Content-Type", "audio/wav").header("Content-Length", buf.length).send(buf);
+      } catch {
+        return reply.code(404).send({ error: "file_missing" });
+      }
+    }
+    // Legacy filesystem recordings.
     const dumpDir = path.resolve(env.DUMP_DIR);
     const full = path.resolve(dumpDir, call.recordingUrl);
     if (!full.startsWith(dumpDir)) return reply.code(403).send({ error: "forbidden" });
