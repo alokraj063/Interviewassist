@@ -4,9 +4,11 @@
 import { Pdf, C, M, PAGE, toneFor } from "./pdfKit.js";
 
 export interface QuestionBank {
-  skills?: Array<{ skill?: string; questions?: Array<{ difficulty?: string; question?: string; answer?: string }> }>;
+  skills?: Array<{ skill?: string; questions?: Array<{ difficulty?: string; type?: string; question?: string; answer?: string }> }>;
   total?: number;
 }
+
+const EXAMPLE_TYPES = new Set(["Coding", "Query", "Command", "Config"]);
 
 export async function buildQuestionBankReport(
   bank: QuestionBank,
@@ -35,8 +37,12 @@ export async function buildQuestionBankReport(
       n++;
       pdf.ensure(q.answer ? 46 : 34);
       const cw = pdf.chip(M, pdf.y, q.difficulty ?? "Medium", toneFor(q.difficulty));
-      pdf.text(`${n}.  ${q.question ?? ""}`, { indent: cw + 10, size: 10.5, gap: q.answer ? 3 : 9 });
-      if (q.answer) pdf.text(`Expected: ${q.answer}`, { indent: cw + 10, size: 9, color: C.muted, gap: 9 });
+      const typeTag = q.type ? `[${q.type}]  ` : "";
+      pdf.text(`${n}.  ${typeTag}${q.question ?? ""}`, { indent: cw + 10, size: 10.5, gap: q.answer ? 3 : 9 });
+      if (q.answer) {
+        const label = EXAMPLE_TYPES.has(q.type ?? "") ? "Example" : "Expected";
+        pdf.text(`${label}: ${q.answer}`, { indent: cw + 10, size: 9, color: C.muted, gap: 9 });
+      }
     }
     pdf.gap(6);
   }

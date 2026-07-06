@@ -280,7 +280,21 @@ QUALITY BAR — each question must: (a) target ONE concrete competency an interv
 
 DEPTH & DIFFICULTY MIX — lean HARD/TECHNICAL. Aim for roughly 20% Easy, 45% Medium, 35% Hard. The bank must be dominated by hands-on TECHNICAL questions — configuration, transactions/commands, tables/objects, debugging, integration, performance, edge cases — not definitional or behavioural ones. At most ONE "Easy" fundamentals question per skill; spend the rest on Medium/Hard depth.
 
-ANSWER KEY (PRECISE, SHORT): For EACH question provide "answer" — the KEY POINTS a strong candidate MUST mention, as 4–7 comma-separated keywords/phrases the interviewer can scan while listening. Make them PRECISE and DISCRIMINATING: include the exact technical identifiers that prove hands-on knowledge — transaction/command names, table/object names, config paths, movement/document types, parameters, standards/versions. Still a cheat-sheet, NOT prose: no full sentences, ≤ 22 words total. Example → question about a goods issue to a cost center, answer: "MIGO / MB1A, movement type 201, cost center, reservation, GL auto-posting via OBYC, value/quantity update".
+QUESTION TYPE — tag EACH question with "type", exactly one of:
+  • "Concept" — explain how/why something works.
+  • "Scenario" — a real troubleshooting or situational problem.
+  • "Coding" — write code / a function / a formula.
+  • "Query" — write a SQL / DB / API query.
+  • "Command" — an exact CLI / transaction / tool command or step sequence.
+  • "Config" — configuration objects / paths / values to set.
+  • "Design" — architecture / approach / trade-offs.
+Choose "Coding"/"Query"/"Command"/"Config" whenever the question asks the candidate to WRITE something, SHOW syntax, or GIVE AN EXAMPLE.
+
+ANSWER — FORMAT MUST MATCH THE TYPE:
+  • Coding / Query / Command: the "answer" MUST contain the ACTUAL example — a short, correct, ready-to-read snippet / query / command (real syntax, not a description) — followed by " · " and 2–3 key points that make it correct. e.g. "SELECT dept_id, COUNT(*) FROM emp GROUP BY dept_id HAVING COUNT(*)>5; · GROUP BY, HAVING vs WHERE, aggregate".
+  • Config: the exact objects/paths/values (e.g. "OMSY, plant, current period; OB52 posting periods; T001B").
+  • Concept / Scenario / Design: 4–7 PRECISE comma-separated keywords/phrases — exact transaction/table/object names, parameters, standards — a cheat-sheet, NOT prose, ≤ 22 words. e.g. "MIGO / MB1A, movement type 201, cost center, reservation, OBYC GL auto-posting".
+In ALL cases the answer is compact (one line where possible) — the interviewer scans it while listening.
 
 GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name (in questions AND answers) MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
 
@@ -291,11 +305,13 @@ SIZE — STRICT: Produce AT LEAST ${BANK_MIN_QUESTIONS} questions total. NEVER f
 All output text MUST be in English.
 
 Respond ONLY as JSON with this exact shape:
-{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "question": str, "answer": str}, ...]}, ...]}`;
+{"skills": [{"skill": str, "questions": [{"difficulty": "Easy"|"Medium"|"Hard", "type": "Concept"|"Scenario"|"Coding"|"Query"|"Command"|"Config"|"Design", "question": str, "answer": str}, ...]}, ...]}`;
+
+const BANK_TYPES = ["Concept", "Scenario", "Coding", "Query", "Command", "Config", "Design"];
 
 export interface JdQuestionBank {
   kind: "jd_question_bank";
-  skills: Array<{ skill: string; questions: Array<{ difficulty: string; question: string; answer?: string }> }>;
+  skills: Array<{ skill: string; questions: Array<{ difficulty: string; type?: string; question: string; answer?: string }> }>;
   notesUsed: string;
   total: number;
   generatedAt: string;
@@ -312,9 +328,10 @@ function parseBankSkills(result: Record<string, unknown>): BankSkillGroup[] {
         skill: typeof o.skill === "string" ? o.skill : "General",
         questions: qs
           .map((q) => {
-            const qo = q as { difficulty?: unknown; question?: unknown; answer?: unknown };
+            const qo = q as { difficulty?: unknown; type?: unknown; question?: unknown; answer?: unknown };
             return {
               difficulty: ["Easy", "Medium", "Hard"].includes(qo.difficulty as string) ? (qo.difficulty as string) : "Medium",
+              type: BANK_TYPES.includes(qo.type as string) ? (qo.type as string) : "Concept",
               question: typeof qo.question === "string" ? qo.question.trim() : "",
               answer: typeof qo.answer === "string" ? qo.answer.trim() : "",
             };
