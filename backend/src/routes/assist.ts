@@ -269,7 +269,7 @@ const historySchema = z.array(
 );
 
 // --- JD-specific, SKILL-WISE question bank (generated once per demand) -------
-const BANK_MIN_QUESTIONS = 30;
+const BANK_MIN_QUESTIONS = 45;
 const BANK_SYSTEM = `You are an expert technical interviewer building a reusable QUESTION BANK for a specific JOB DESCRIPTION. The bank is organised SKILL-WISE: grouped by the distinct skills/areas the JD requires.
 
 STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
@@ -278,7 +278,9 @@ STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that
 
 QUALITY BAR — each question must: (a) target ONE concrete competency an interviewer can score; (b) be answerable verbally in under ~2 minutes (not an essay); (c) invite a "how/why/walk me through" explanation, not recall of a definition; (d) use precise domain terminology from the JD. Prefer real scenarios ("A GR posts to the wrong valuation class — how do you find and fix it?") over abstract prompts ("explain valuation classes").
 
-ANSWER KEY (SHORT KEYWORDS): For EACH question also provide "answer" — the KEY POINTS a strong candidate MUST mention, written as 3–6 short comma-separated keywords/phrases the interviewer can scan while listening. It is a cheat-sheet, NOT prose: no full sentences, ≤ 15 words total. Example → question about a goods issue to a cost center, answer: "MIGO, movement type 201, cost center, reservation, GL auto-posting".
+DEPTH & DIFFICULTY MIX — lean HARD/TECHNICAL. Aim for roughly 20% Easy, 45% Medium, 35% Hard. The bank must be dominated by hands-on TECHNICAL questions — configuration, transactions/commands, tables/objects, debugging, integration, performance, edge cases — not definitional or behavioural ones. At most ONE "Easy" fundamentals question per skill; spend the rest on Medium/Hard depth.
+
+ANSWER KEY (PRECISE, SHORT): For EACH question provide "answer" — the KEY POINTS a strong candidate MUST mention, as 4–7 comma-separated keywords/phrases the interviewer can scan while listening. Make them PRECISE and DISCRIMINATING: include the exact technical identifiers that prove hands-on knowledge — transaction/command names, table/object names, config paths, movement/document types, parameters, standards/versions. Still a cheat-sheet, NOT prose: no full sentences, ≤ 22 words total. Example → question about a goods issue to a cost center, answer: "MIGO / MB1A, movement type 201, cost center, reservation, GL auto-posting via OBYC, value/quantity update".
 
 GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name (in questions AND answers) MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
 
