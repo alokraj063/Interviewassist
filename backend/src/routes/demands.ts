@@ -9,6 +9,7 @@
 // We also resolve the `clientId` → `companyName` on read so the picker can
 // show a human-friendly client label, but neither collection is written to.
 
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ObjectId } from "mongodb";
 import { collections } from "../mongo.js";
@@ -41,6 +42,24 @@ interface OlJobPosting {
 interface OlClient {
   _id: ObjectId;
   companyName?: string;
+}
+
+// Latest human-refined requirement for a job — OL's `demand_calibration`
+// collection (one doc per (jobPostingId, version), read-only from here).
+interface OlDemandCalibration {
+  uid: string;
+  version: number;
+  fields?: {
+    designation?: string;
+    experienceFrom?: number;
+    experienceTo?: number;
+    workMode?: string;
+    location?: string;
+    keyResponsibilities?: string[];
+    mustHaves?: string[];
+    goodToHave?: string[];
+    caveats?: string[];
+  };
 }
 
 // Map an OL JobPosting → the shape the Live Assist frontend expects from
@@ -159,7 +178,15 @@ export async function demandsRoutes(app: FastifyInstance) {
   // Demands are read-only OL jobPostings, so the bank lives in our own
   // `ia_question_banks` collection, keyed by demandId (the jobPosting _id hex).
   // v1 = base JD; each later version layers extra JD points the recruiter typed.
-  interface BankVersion { version: number; addedJd: string; bank: unknown; generatedAt: string }
+  interface BankVersion {
+    version: number;
+    addedJd: string;
+    bank: unknown;
+    generatedAt: string;
+    jdFingerprint?: string;            // sha256 of baseJd + calibration block (absent on legacy versions)
+    calibrationUid?: string | null;    // traceability only — staleness uses the fingerprint
+    calibrationVersion?: number | null;
+  }
   interface QuestionBankDoc { demandId: string; recruiterUid: string; assessmentNotes: string; versions: BankVersion[]; updatedAt: Date }
 
   // Resolve a jobPosting the caller is allowed to see, or send the error reply.
@@ -196,6 +223,49 @@ export async function demandsRoutes(app: FastifyInstance) {
     ].filter(Boolean).join("\n").trim();
   }
 
+  // Latest calibration for a job (highest version wins). Absent doc = the
+  // AM/BH never ran a calibration for this demand.
+  async function loadLatestCalibration(jobOid: ObjectId): Promise<OlDemandCalibration | null> {
+    return collections
+      .olDemandCalibrations()
+      .find<OlDemandCalibration>({ jobPostingId: jobOid })
+      .sort({ version: -1 })
+      .limit(1)
+      .next();
+  }
+
+  // Render the calibration into the same block format the OL matching prompt
+  // uses (backend/services/ai/prompts/matchScorePrompt.js) — the BANK_SYSTEM
+  // prompt references this exact header. Empty string when there's nothing
+  // meaningful to say.
+  function buildCalibrationBlock(cal: OlDemandCalibration | null): string {
+    const f = cal?.fields;
+    if (!f) return "";
+    const list = (items?: string[]) => (items ?? []).filter(Boolean).map((x) => `  • ${x}`).join("\n");
+    const hasContent =
+      (f.mustHaves ?? []).length || (f.goodToHave ?? []).length ||
+      (f.caveats ?? []).length || (f.keyResponsibilities ?? []).length ||
+      f.designation || f.experienceFrom || f.experienceTo || f.workMode || f.location;
+    if (!hasContent) return "";
+    return "\n\n=== CALIBRATION (refined requirement — overrides JD on conflict) ===\n" + [
+      f.designation ? `Refined designation: ${f.designation}` : "",
+      (f.experienceFrom || f.experienceTo)
+        ? `Refined experience range: ${f.experienceFrom ?? 0}-${f.experienceTo ?? 0} years` : "",
+      f.workMode ? `Refined work mode: ${f.workMode}` : "",
+      f.location ? `Refined location: ${f.location}` : "",
+      (f.mustHaves ?? []).length ? `MUST-HAVES (hard requirements):\n${list(f.mustHaves)}` : "",
+      (f.caveats ?? []).length ? `CAVEATS (disqualifiers / watch-outs):\n${list(f.caveats)}` : "",
+      (f.goodToHave ?? []).length ? `GOOD-TO-HAVE (bonus):\n${list(f.goodToHave)}` : "",
+      (f.keyResponsibilities ?? []).length ? `KEY RESPONSIBILITIES:\n${list(f.keyResponsibilities)}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  // Fingerprint of the upstream inputs (JD + rendered calibration). Hashes the
+  // rendered block rather than calibration uid:version because OL edits the
+  // latest calibration version IN PLACE. `addedJd` is deliberately excluded.
+  const fingerprintOf = (baseJd: string, calBlock: string) =>
+    createHash("sha256").update(baseJd + "\u0000" + calBlock).digest("hex");
+
   // Return all stored question-bank versions for a demand.
   app.get<{ Params: { id: string } }>("/:id/question-bank", async (req, reply) => {
     const job = await loadOwnedJob(req, reply, req.params.id);
@@ -206,9 +276,11 @@ export async function demandsRoutes(app: FastifyInstance) {
 
   // Generate a question-bank version.
   //  - `addedJd` text → a NEW version using the JD PLUS those extra points.
-  //  - blank `addedJd` AND versions already exist → return the existing ones
-  //    unchanged (load the old JD only — no regeneration).
-  //  - blank and no bank yet → generate v1 from the JD.
+  //  - blank `addedJd` AND versions exist AND the JD + calibration are
+  //    unchanged since the last version → return the existing ones (cached).
+  //  - blank but the JD or calibration CHANGED (fingerprint mismatch) →
+  //    regenerate a fresh version from the latest inputs.
+  //  - blank and no bank yet → generate v1 from the JD (+ calibration).
   app.post<{ Params: { id: string }; Body: { addedJd?: string } }>("/:id/question-bank", async (req, reply) => {
     if (!env.OPENAI_API_KEY) return reply.code(503).send({ ok: false, error: "openai_not_configured" });
     const job = await loadOwnedJob(req, reply, req.params.id);
@@ -219,15 +291,24 @@ export async function demandsRoutes(app: FastifyInstance) {
     const existing = await collections.questionBanks().findOne<QuestionBankDoc>({ demandId: req.params.id });
     const versions: BankVersion[] = existing?.versions ?? [];
 
-    if (!addedJd && versions.length > 0) {
-      return { ok: true, created: false, versions, assessmentNotes: existing?.assessmentNotes ?? "" };
-    }
-
     const baseJd = await buildJdText(job);
     if (!baseJd) return reply.code(400).send({ ok: false, error: "demand_has_no_jd" });
+    const calibration = await loadLatestCalibration(job._id);
+    const calBlock = buildCalibrationBlock(calibration);
+    const fingerprint = fingerprintOf(baseJd, calBlock);
+
+    if (!addedJd && versions.length > 0) {
+      // Legacy versions have no fingerprint → treated as stale (regenerate
+      // once, which stamps it), so pre-existing banks pick up JD changes too.
+      const last = versions[versions.length - 1];
+      if (last.jdFingerprint === fingerprint) {
+        return { ok: true, created: false, versions, assessmentNotes: existing?.assessmentNotes ?? "" };
+      }
+    }
+
     const effectiveJd = addedJd
-      ? `${baseJd}\n\nADDITIONAL JD POINTS (added by the recruiter — weight these too):\n${addedJd}`
-      : baseJd;
+      ? `${baseJd}${calBlock}\n\nADDITIONAL JD POINTS (added by the recruiter — weight these too):\n${addedJd}`
+      : `${baseJd}${calBlock}`;
 
     const bank = await generateJdQuestionBank(effectiveJd, existing?.assessmentNotes ?? "", {
       orgId: ctx.uid,
@@ -237,7 +318,15 @@ export async function demandsRoutes(app: FastifyInstance) {
     const nextVersion = (versions[versions.length - 1]?.version ?? 0) + 1;
     const newVersions: BankVersion[] = [
       ...versions,
-      { version: nextVersion, addedJd, bank, generatedAt: generatedAt.toISOString() },
+      {
+        version: nextVersion,
+        addedJd,
+        bank,
+        generatedAt: generatedAt.toISOString(),
+        jdFingerprint: fingerprint,
+        calibrationUid: calibration?.uid ?? null,
+        calibrationVersion: calibration?.version ?? null,
+      },
     ];
     await collections.questionBanks().updateOne(
       { demandId: req.params.id },

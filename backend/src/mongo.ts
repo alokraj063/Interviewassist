@@ -69,6 +69,8 @@ export const collections = {
   // résumés when the recruiter searches the OfferLetter pool.
   olCandidateProfiles:  () => col("candidateProfiles"),
   olCandidateDocuments: () => col("candidateDocuments"),
+  // Human-refined demand calibration (one doc per (jobPostingId, version)).
+  olDemandCalibrations: () => col("demand_calibration"),
 
   // ── Interview-Assist owned (writeable) ──────────────────────────────
   interviews:           () => col("ia_interviews"),

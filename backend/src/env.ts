@@ -107,8 +107,8 @@ const schema = z.object({
   JUDGE0_URL: z
     .preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   JUDGE0_AUTH_TOKEN: z.string().optional(),
-  OPENAI_MODEL: z.string().default("gpt-4o-mini"),
-  OPENAI_MODEL_FALLBACK: z.string().default("gpt-4o-mini"),
+  OPENAI_MODEL: z.string().default("gpt-5.4-mini"),
+  OPENAI_MODEL_FALLBACK: z.string().default("gpt-5.4-mini"),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   BLOB_ROOT: z.string().default("./var/blobs"),
   RESEND_API_KEY: z.string().optional(),
@@ -149,4 +149,13 @@ export type Env = typeof env;
  */
 export function chatModel(): string {
   return env.OPENAI_MODEL || env.OPENAI_MODEL_FALLBACK;
+}
+
+/**
+ * Temperature spread for chat calls. GPT-5-family models reject any
+ * non-default `temperature`, so omit the param for them; older models keep
+ * their low-temperature determinism. Usage: `...chatTemperature(0.3)`.
+ */
+export function chatTemperature(temperature: number): { temperature?: number } {
+  return chatModel().startsWith("gpt-5") ? {} : { temperature };
 }

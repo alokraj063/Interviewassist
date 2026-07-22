@@ -20,7 +20,7 @@ import OpenAI from "openai";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { collections } from "../mongo.js";
-import { chatModel, env } from "../env.js";
+import { chatModel, chatTemperature, env } from "../env.js";
 import { recordUsage, usageSummary } from "../usage/tracker.js";
 
 let _client: OpenAI | null = null;
@@ -46,7 +46,7 @@ async function gptJson(
       { role: "user", content: user },
     ],
     response_format: { type: "json_object" },
-    temperature: 0.3,
+    ...chatTemperature(0.3),
   });
   void recordUsage({
     orgId: track.orgId,
@@ -213,7 +213,9 @@ Respond ONLY as JSON with this exact shape:
 
 const FINAL_SYSTEM = `You are a senior interview evaluator producing the FINAL evaluation after the interview. You receive the JD, the candidate profile/resume, and the full transcript (every Q with its answer + the live verdict). Be honest and calibrated — don't inflate or deflate; ground claims in what the candidate actually said. If the interview was short, lower confidence and prefer "Borderline".
 
-Score each dimension 0-100: communication, relevance, depth, skills_match, overall (a hire-recommendation, not just the average).
+EVIDENCE WEIGHTING — THE MOST IMPORTANT RULE: score from what the candidate actually SAID in the interview. The resume and JD are context that tell you what to look for — they are NOT evidence of ability. A resume claim only counts when the candidate backed it up with specifics on the call. An impressive resume with thin answers is a WEAK interview and must score as one. skills_match reflects only skills demonstrated or credibly discussed in the answers; depth reflects the concrete detail they actually gave. Strengths/concerns must cite the answers, never resume facts.
+
+Score each dimension 0-100: communication, relevance, depth, skills_match, overall (a hire-recommendation, not just the average). Hard rule: if no answer contains a concrete example, depth and skills_match must be ≤ 50 and overall ≤ 55.
 
 All output text MUST be in English.
 
@@ -269,7 +271,9 @@ const historySchema = z.array(
 );
 
 // --- JD-specific, SKILL-WISE question bank (generated once per demand) -------
-const BANK_MIN_QUESTIONS = 45;
+const BANK_TARGET_QUESTIONS = 30;   // aim for ~30 in ONE call — speed over bulk
+const BANK_TOPUP_THRESHOLD = 26;    // top up (once) only if the first call fell short
+const BANK_MAX_QUESTIONS = 32;      // hard cap enforced in code — models over-count
 const BANK_SYSTEM = `You are an expert technical interviewer building a reusable QUESTION BANK for a specific JOB DESCRIPTION. The bank is organised SKILL-WISE: grouped by the distinct skills/areas the JD requires.
 
 STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
@@ -279,6 +283,8 @@ STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that
 QUALITY BAR — each question must: (a) target ONE concrete competency an interviewer can score; (b) be answerable verbally in under ~2 minutes (not an essay); (c) invite a "how/why/walk me through" explanation, not recall of a definition; (d) use precise domain terminology from the JD. Prefer real scenarios ("A GR posts to the wrong valuation class — how do you find and fix it?") over abstract prompts ("explain valuation classes").
 
 DEPTH & DIFFICULTY MIX — lean HARD/TECHNICAL. Aim for roughly 20% Easy, 45% Medium, 35% Hard. The bank must be dominated by hands-on TECHNICAL questions — configuration, transactions/commands, tables/objects, debugging, integration, performance, edge cases — not definitional or behavioural ones. At most ONE "Easy" fundamentals question per skill; spend the rest on Medium/Hard depth.
+
+TYPE MIX — STRICT: at most 20% of all questions may be type "Concept". Every other question must be hands-on: "Scenario", "Coding", "Query", "Command", "Config", or "Design". If a question can be phrased as "write the query / show the command / name the config object / walk through this failure" instead of "explain X", it MUST be. Definitional "what is X" questions are banned.
 
 QUESTION TYPE — tag EACH question with "type", exactly one of:
   • "Concept" — explain how/why something works.
@@ -300,7 +306,9 @@ GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name (in quest
 
 EMPHASIS: If the recruiter provided EMPHASIS NOTES or ADDITIONAL JD POINTS, weight the bank accordingly — give those skills MORE questions and HARDER ones, and put them first.
 
-SIZE — STRICT: Produce AT LEAST ${BANK_MIN_QUESTIONS} questions total. NEVER fewer than ${BANK_MIN_QUESTIONS}. If the JD names only a few skills, go DEEPER on each (more Easy/Medium/Hard per skill) and include the closely-related fundamentals the role genuinely requires, until you reach at least ${BANK_MIN_QUESTIONS} quality questions. Roughly 4–8 per skill.
+CALIBRATION: the JD may contain a "=== CALIBRATION (refined requirement — overrides JD on conflict) ===" block — the human-refined requirement from client calls. It is MORE authoritative than the JD text: if they conflict, follow the calibration. MUST-HAVES get MORE questions and HARDER ones, and their skills come first in the bank. CAVEATS are disqualifiers the client flagged — include probing questions designed to expose whether the candidate falls into them. GOOD-TO-HAVE items get at most 1–2 questions each.
+
+SIZE — STRICT: Produce AT LEAST 28 and AT MOST 32 questions total (target ${BANK_TARGET_QUESTIONS}). COUNT your questions before responding — fewer than 28 is a hard failure. Roughly 4–5 per skill. If the JD names many skills, prioritise the must-have/core skills rather than covering everything thinly; if it names only a few, go deeper on each until you reach ${BANK_TARGET_QUESTIONS} quality questions.
 
 All output text MUST be in English.
 
@@ -358,10 +366,25 @@ function mergeBankSkills(base: BankSkillGroup[], extra: BankSkillGroup[]): BankS
 }
 const countBankQ = (skills: BankSkillGroup[]) => skills.reduce((n, s) => n + s.questions.length, 0);
 
+// Enforce the size cap deterministically: drop the last question of the
+// currently-largest skill group until within `max`, so no skill is wiped out
+// and coverage stays balanced.
+function trimBankSkills(skills: BankSkillGroup[], max: number): BankSkillGroup[] {
+  let total = countBankQ(skills);
+  if (total <= max) return skills;
+  const out = skills.map((s) => ({ skill: s.skill, questions: [...s.questions] }));
+  while (total > max) {
+    const largest = out.reduce((a, b) => (b.questions.length > a.questions.length ? b : a));
+    largest.questions.pop();
+    total--;
+  }
+  return out.filter((s) => s.questions.length > 0);
+}
+
 /**
  * Generate a skill-wise question bank for a JD (+ optional emphasis notes).
- * Guarantees AT LEAST 30 questions by topping up (up to 2 extra rounds) without
- * duplicating questions.
+ * Normally a SINGLE model call targeting ~${BANK_TARGET_QUESTIONS} questions;
+ * one top-up round only if the first call falls far short (< threshold).
  */
 export async function generateJdQuestionBank(
   jd: string,
@@ -371,15 +394,14 @@ export async function generateJdQuestionBank(
   const baseUser = `JOB DESCRIPTION:\n${jd || "(none provided)"}\n\nEMPHASIS NOTES / ADDITIONAL JD POINTS (weight these too):\n${notes?.trim() || "(none)"}`;
   let skills = parseBankSkills(await gptJson(BANK_SYSTEM, baseUser, track));
 
-  for (let round = 0; round < 2 && countBankQ(skills) < BANK_MIN_QUESTIONS; round++) {
-    const need = BANK_MIN_QUESTIONS - countBankQ(skills);
+  if (countBankQ(skills) < BANK_TOPUP_THRESHOLD) {
+    const need = BANK_TARGET_QUESTIONS - countBankQ(skills);
     const have = skills.map((s) => `${s.skill}:\n${s.questions.map((q) => `- ${q.question}`).join("\n")}`).join("\n\n");
     const topUpUser = `${baseUser}\n\nQUESTIONS ALREADY WRITTEN (do NOT repeat or paraphrase these):\n${have}\n\nGenerate ${need} ADDITIONAL distinct, high-quality, JD-specific questions (deepen existing skills and/or add closely-related required skills). Same JSON shape.`;
     const more = parseBankSkills(await gptJson(BANK_SYSTEM, topUpUser, track));
-    const merged = mergeBankSkills(skills, more);
-    if (countBankQ(merged) === countBankQ(skills)) break;
-    skills = merged;
+    skills = mergeBankSkills(skills, more);
   }
+  skills = trimBankSkills(skills, BANK_MAX_QUESTIONS);
 
   return {
     kind: "jd_question_bank",
@@ -396,11 +418,22 @@ const FINAL_FROM_TRANSCRIPT_SYSTEM = `You are a senior interview evaluator. You 
 
 The call used a single mixed microphone, so speaker labels may be WRONG. Judge by CONTENT: the INTERVIEWER asks short probing questions; the CANDIDATE describes their own experience, skills, and decisions. Reconstruct the conversation from content, not labels.
 
+EVIDENCE WEIGHTING — THE MOST IMPORTANT RULE: the TRANSCRIPT is the evaluation. The resume and JD are context that tell you what to LOOK FOR — they are NOT evidence of ability. A resume claim only counts toward a score when the candidate backed it up on the call with specifics (what they built, how it worked, decisions, trade-offs, numbers). NEVER lift a score because the resume looks strong: an impressive resume with a thin call is a WEAK interview, and the scores must say so.
+
 Do TWO things:
 (1) Reconstruct the interview as the key QUESTIONS the interviewer asked, each with the candidate's ANSWER (summarised from the transcript) and a short verdict.
-(2) Produce a calibrated FINAL evaluation. Be honest and grounded in what was actually said. If the call was very short or thin on substance, lower confidence, prefer "Borderline" or lower, and say so in the summary.
+(2) Produce a calibrated FINAL evaluation OF THE CALL. Be honest and grounded in what was actually said. If the call was very short or thin on substance, lower confidence, prefer "Borderline" or lower, and say so in the summary.
 
-Score each dimension 0-100: communication, relevance, depth, skills_match, overall (a hire recommendation, not just the average).
+Score each dimension 0-100 from TRANSCRIPT EVIDENCE ONLY:
+- communication: how clearly and coherently they actually spoke on the call.
+- relevance: how much of what they SAID addresses the JD's must-haves — not how relevant their resume looks.
+- depth: the specifics they gave — concrete examples, how/why detail, trade-offs. Vague or generic answers = low depth, whatever the resume says.
+- skills_match: JD must-have skills the candidate DEMONSTRATED or credibly discussed on the call. Skills that appear only on the resume and were never substantiated in conversation do NOT raise this score.
+- overall: a hire recommendation for this interview (not an average, and not a resume screen).
+
+CALIBRATION CAPS (hard rules): if the candidate gave NO concrete example anywhere in the call, depth and skills_match must be ≤ 50 and overall ≤ 55. If the call contains only a handful of substantive answers, no dimension may exceed 70.
+
+STRENGTHS and CONCERNS must each cite what happened ON THE CALL — something they said, demonstrated, or conspicuously failed to say. Never list a resume fact (e.g. "strong educational background") as a strength. A gap between what the resume claims and what the candidate could actually discuss IS a concern worth naming.
 
 All output MUST be in English. Respond ONLY as JSON with this exact shape:
 {"verdict": "Strong yes"|"Lean yes"|"Borderline"|"Lean no"|"Strong no",
@@ -452,7 +485,14 @@ export async function evaluateCallFromTranscript(callId: string, uid: string): P
     .trim();
   if (!transcript) return null;
 
-  const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL CALL TRANSCRIPT (labels may be imperfect — judge by content):\n${transcript}`;
+  // Objective size signals so the model calibrates "short/thin call" on
+  // numbers instead of guessing from the text alone.
+  const durationMs = turns.length >= 2 ? (turns[turns.length - 1].tsStartMs ?? 0) - (turns[0].tsStartMs ?? 0) : 0;
+  const durationMin = Math.max(1, Math.round(durationMs / 60_000));
+  const wordCount = transcript.split(/\s+/).length;
+  const stats = `CALL STATS: ~${durationMin} min, ${turns.length} transcript turns, ~${wordCount} words spoken total.`;
+
+  const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME (context only — NOT scoring evidence):\n${ctx.resume || "(none)"}\n\n${stats}\n\nFULL CALL TRANSCRIPT (labels may be imperfect — judge by content; THIS is the evidence you score from):\n${transcript}`;
   const result = await gptJson(FINAL_FROM_TRANSCRIPT_SYSTEM, user, { orgId: uid, operation: "final", callId });
   const questions = (result.questions as CallEvaluation["questions"]) ?? [];
   return {
@@ -634,7 +674,7 @@ export async function assistRoutes(app: FastifyInstance) {
     const ctx = await loadJdResume(body.data.callId, req.authUser!.uid);
     if (!ctx) return reply.code(404).send({ ok: false, error: "call_not_found" });
 
-    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME:\n${ctx.resume || "(none)"}\n\nFULL INTERVIEW:\n${fmtHistory(body.data.history)}`;
+    const user = `JOB DESCRIPTION:\n${ctx.jd || "(none)"}\n\nCANDIDATE PROFILE / RESUME (context only — NOT scoring evidence):\n${ctx.resume || "(none)"}\n\nFULL INTERVIEW (THIS is the evidence you score from):\n${fmtHistory(body.data.history)}`;
     const result = await gptJson(FINAL_SYSTEM, user, { orgId: req.authUser!.uid, operation: "final", callId: body.data.callId });
 
     const evaluation = {
