@@ -8,7 +8,7 @@ import type {
   TranscriptTurn,
 } from "@j2w/shared-types";
 import type { FastifyBaseLogger } from "fastify";
-import { chatModel, env } from "../env.js";
+import { chatModel, chatTemperature, env } from "../env.js";
 import { recordUsage } from "../usage/tracker.js";
 import { broadcastToCall } from "../ws/session.js";
 
@@ -314,7 +314,8 @@ export async function maybeSuggest(
       stream: true,
       response_format: { type: "json_schema", json_schema: JSON_SCHEMA },
       // Lower temperature: structured suggestions shouldn't be creative.
-      temperature: 0.2,
+      // (Omitted automatically for GPT-5-family models, which reject it.)
+      ...chatTemperature(0.2),
       // Emit a final usage chunk so we can record token cost for the Usage tab.
       stream_options: { include_usage: true },
     });

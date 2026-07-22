@@ -79,3 +79,4 @@ pnpm-store/
 tmp/
 temp/
 .cache/
+transcripts/
