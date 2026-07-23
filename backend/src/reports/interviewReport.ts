@@ -14,6 +14,8 @@ export interface InterviewEval {
   concerns?: string[];
   candidateName?: string;
   generatedAt?: string;
+  questionCount?: number;
+  answeredCount?: number;
   questions?: Array<{ category?: string; question?: string; answer?: string; verdict?: string; feedback?: string }>;
 }
 
@@ -83,7 +85,9 @@ export async function buildInterviewReport(
 
   // ---- Q&A ----
   if (ev.questions?.length) {
-    pdf.eyebrow("Questions & Answers");
+    const total = ev.questionCount ?? ev.questions.length;
+    const answered = ev.answeredCount ?? ev.questions.filter((q) => (q.answer ?? "").trim() && q.verdict !== "Off-topic").length;
+    pdf.eyebrow(`Questions & Answers  —  answered ${answered} of ${total}`);
     ev.questions.forEach((q, i) => {
       pdf.ensure(64);
       const startPage = pdf.page;

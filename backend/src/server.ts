@@ -12,10 +12,14 @@ import { assistRoutes } from "./routes/assist.js";
 import { healthRoutes } from "./routes/health.js";
 import { candidatesRoutes } from "./routes/candidates.js";
 import { demandsRoutes } from "./routes/demands.js";
+import { telephonyRoutes } from "./routes/telephony.js";
+import { telephonyOAuthRoutes } from "./routes/telephonyOAuth.js";
+import { frejunWebhookRoutes } from "./routes/frejunWebhook.js";
 import { registerAgentWs } from "./ws/agent.js";
 import { registerCustomTranscriberWs } from "./ws/custom-transcriber.js";
 import { registerIngestWs } from "./ws/ingest.js";
 import { registerIngestCallWs } from "./ws/ingest-call.js";
+import { registerIngestDualWs } from "./ws/ingest-dual.js";
 import { registerSessionWs } from "./ws/session.js";
 
 // We don't sign our own JWTs anymore — the OL cookie carries the session.
@@ -106,6 +110,17 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(assistRoutes,     { prefix: "/api/assist" });
   await app.register(candidatesRoutes, { prefix: "/api/candidates" });
   await app.register(demandsRoutes,    { prefix: "/api/demands" });
+  // FreJun native calling. `telephonyRoutes` is recruiter-authenticated;
+  // `frejunWebhookRoutes` is NOT — it is called by FreJun and authenticates by
+  // shared secret instead. Registered as a separate plugin so its raw-body
+  // JSON parser (needed for HMAC verification) stays encapsulated and can't
+  // affect the other routes.
+  await app.register(telephonyRoutes,  { prefix: "/api/telephony" });
+  // Separate plugin: the OAuth callback must stay outside telephonyRoutes'
+  // blanket `authenticate` hook, since FreJun — not a logged-in recruiter —
+  // is what hits it.
+  await app.register(telephonyOAuthRoutes, { prefix: "/api/telephony/oauth" });
+  await app.register(frejunWebhookRoutes, { prefix: "/api/webhooks" });
   // Routes that were tied to the old multi-tenant model — clients /
   // prospects / users / teams / roles / org / platform / question-banks /
   // auth (login/signup) — are no longer registered. The OL app owns those
@@ -113,6 +128,9 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await registerIngestWs(app);
   await registerIngestCallWs(app);
+  // Dual-channel sibling of the above. Separate endpoint, separate Deepgram
+  // client — the mixed-mono path is untouched by it.
+  await registerIngestDualWs(app);
   await registerSessionWs(app);
   await registerAgentWs(app);
   await registerCustomTranscriberWs(app);

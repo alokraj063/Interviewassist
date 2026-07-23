@@ -137,6 +137,27 @@ export type SessionServerMessage =
       alternates?: Array<{ code: string; confidence: number }>;
     }
   | { type: "call.ended"; callId: string; ts: number }
+  // ---- FreJun telephony lifecycle (additive; the mic-capture path never
+  // emits these, so existing clients are unaffected). The browser uses
+  // `call.answered` as the signal to START streaming audio and `call.ended`
+  // to STOP — replacing the old "recruiter clicks Start/End" handshake.
+  | {
+      type: "call.status";
+      callId: string;
+      status:
+        | "created"
+        | "dialing"
+        | "ringing"
+        | "answered"
+        | "completed"
+        | "busy"
+        | "not-answered"
+        | "failed";
+      direction: "outbound" | "inbound";
+      ts: number;
+    }
+  | { type: "call.answered"; callId: string; ts: number }
+  | { type: "recording.ready"; callId: string; ts: number }
   // Triage warm-handoff lifecycle. Server picks an idle user in the target
   // team, seeds the triage transcript on that callId, and broadcasts
   // `handoff.incoming` to every socket on that callId — the assigned user's

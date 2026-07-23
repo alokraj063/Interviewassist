@@ -107,8 +107,8 @@ const schema = z.object({
   JUDGE0_URL: z
     .preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   JUDGE0_AUTH_TOKEN: z.string().optional(),
-  OPENAI_MODEL: z.string().default("gpt-4o-mini"),
-  OPENAI_MODEL_FALLBACK: z.string().default("gpt-4o-mini"),
+  OPENAI_MODEL: z.string().default("gpt-5.4-mini"),
+  OPENAI_MODEL_FALLBACK: z.string().default("gpt-5.4-mini"),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   BLOB_ROOT: z.string().default("./var/blobs"),
   RESEND_API_KEY: z.string().optional(),
@@ -132,6 +132,43 @@ const schema = z.object({
   OFFER_LETTER_MYSQL_TLS: z
     .preprocess((v) => (typeof v === "string" ? v.toLowerCase() !== "false" : v ?? true), z.boolean())
     .default(true),
+  // ─── FreJun telephony (native calling from the OfferLetter tool) ────────
+  // All optional in dev — when FREJUN_API_KEY is unset every /api/telephony
+  // route returns 503 {error:"frejun_not_configured"}, same convention the
+  // other providers use. NOTE: FreJun's own transcript / AI-insights fields
+  // are deliberately NOT consumed — this service transcribes with Deepgram +
+  // OpenAI. We only use FreJun to place, receive and record the call.
+  FREJUN_API_BASE: z.string().url().default("https://api.frejun.com/api/v1"),
+  FREJUN_API_KEY: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  // Default virtual number used as caller-ID for outbound calls. Optional —
+  // FreJun picks the account default when omitted.
+  FREJUN_VIRTUAL_NUMBER: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  // Shared secret used to authenticate inbound webhooks. When unset the
+  // receiver runs in "insecure dev" mode: it accepts unsigned deliveries and
+  // logs a warning. In production an unset secret is a hard failure — see
+  // routes/frejunWebhook.ts.
+  FREJUN_WEBHOOK_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  // Header FreJun sends the secret in. Configurable because the dashboard's
+  // webhook editor may only allow custom headers rather than a signature.
+  FREJUN_WEBHOOK_SECRET_HEADER: z.string().default("x-frejun-signature"),
+  // Escape hatch for the agent_id resolver: pins every outbound call to one
+  // FreJun agent. Useful for first-run testing before per-recruiter mapping
+  // is verified. See telephony/agents.ts.
+  FREJUN_DEFAULT_AGENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  // OAuth 2.0 — required by the browser Softphone SDK, which authenticates
+  // with a Bearer access token (the Api-Key above does NOT work for it).
+  // FreJun uses the AUTHORIZATION-CODE flow, not client-credentials: each
+  // recruiter grants access once, and we store their tokens per user. See
+  // telephony/frejunOAuth.ts.
+  FREJUN_OAUTH_CLIENT_ID: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  FREJUN_OAUTH_CLIENT_SECRET: z.preprocess((v) => (v === "" ? undefined : v), z.string().optional()),
+  // Must exactly match the redirect URI registered on the FreJun OAuth app.
+  FREJUN_OAUTH_REDIRECT_URI: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  // Endpoints confirmed by probing: the token URL 403s on an empty body while
+  // every other candidate 404s. Overridable in case FreJun moves them.
+  FREJUN_OAUTH_AUTHORIZE_URL: z.string().url().default("https://product.frejun.com/oauth/authorize/"),
+  FREJUN_OAUTH_TOKEN_URL: z.string().url().default("https://api.frejun.com/api/v1/oauth/token/"),
+
   // Recordings on local VM volume (until GCS migration). The container path
   // must match the volume mount in deploy/docker-compose.yml.
   DUMP_DIR: z.string().default("./var/audio-dumps"),
@@ -149,4 +186,13 @@ export type Env = typeof env;
  */
 export function chatModel(): string {
   return env.OPENAI_MODEL || env.OPENAI_MODEL_FALLBACK;
+}
+
+/**
+ * Temperature spread for chat calls. GPT-5-family models reject any
+ * non-default `temperature`, so omit the param for them; older models keep
+ * their low-temperature determinism. Usage: `...chatTemperature(0.3)`.
+ */
+export function chatTemperature(temperature: number): { temperature?: number } {
+  return chatModel().startsWith("gpt-5") ? {} : { temperature };
 }
