@@ -77,6 +77,10 @@ export const collections = {
   // Cached, versioned, skill-wise question bank per demand (OL jobPosting id).
   // Keyed by `demandId` so it's generated once per JD and reused across calls.
   questionBanks:        () => col("ia_question_banks"),
+  // Raw FreJun webhook deliveries, kept ONLY for idempotency + replay/debug.
+  // Telephony providers retry aggressively and deliver out of order, so every
+  // handler dedupes against this before mutating an interview.
+  frejunEvents:         () => col("ia_frejun_events"),
 };
 
 // Indexes for the IA collections — idempotent.
@@ -85,4 +89,19 @@ export async function ensureIndexes(): Promise<void> {
   await collections.interviews().createIndex({ id: 1 }, { unique: true });
   await collections.interviews().createIndex({ recruiterUid: 1, startedAt: -1 });
   await collections.questionBanks().createIndex({ demandId: 1 }, { unique: true });
+  // FreJun telephony. Sparse because every pre-telephony interview lacks the
+  // field; partial-unique so two calls can never bind to one FreJun call.
+  await collections.interviews().createIndex(
+    { "telephony.frejunCallId": 1 },
+    { unique: true, partialFilterExpression: { "telephony.frejunCallId": { $type: "string" } } },
+  );
+  await collections.frejunEvents().createIndex({ dedupeKey: 1 }, { unique: true });
+  // Per-recruiter FreJun OAuth grants + the short-lived pending-grant rows the
+  // callback matches on (FreJun does not echo `state`, so this is what ties a
+  // redirect back to the recruiter who started it).
+  await col("ia_frejun_tokens").createIndex({ olUid: 1 }, { unique: true });
+  await col("ia_frejun_oauth_pending").createIndex({ email: 1 }, { unique: true });
+  await col("ia_frejun_oauth_pending").createIndex({ createdAt: 1 }, { expireAfterSeconds: 900 });
+  // Webhook payloads are debug material, not a system of record — expire them.
+  await collections.frejunEvents().createIndex({ receivedAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
 }

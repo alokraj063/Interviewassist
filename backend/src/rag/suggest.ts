@@ -204,6 +204,12 @@ interface CallContext {
   turns: TranscriptTurn[]; // ring buffer, newest last
   lastSuggestionAt: number;
   inFlight: boolean;
+  // Silence-debounce state: a pending suggestion is scheduled a short time
+  // after the latest qualifying turn and rescheduled if another arrives, so a
+  // burst of fragments collapses into ONE LLM call once the speaker pauses.
+  debounceTimer?: NodeJS.Timeout;
+  firstScheduledAt?: number; // for the max-wait cap
+  pendingTriggerTurnId?: number | null;
   // Lazy-loaded recruiter context (demand + candidate). Loaded once per
   // call on first suggestion and cached for the call's lifetime.
   recruiterCtx?: RecruiterCallContext;
@@ -212,7 +218,23 @@ interface CallContext {
 
 const ctx = new Map<string, CallContext>();
 const RING_SIZE = 12;
-const DEBOUNCE_MS = 400;
+
+// ─── Cost controls ───────────────────────────────────────────────────────────
+// The transcript is UNAFFECTED by all of this — every turn from both speakers
+// is still persisted and broadcast in transcription/{dual,mixed}-turn.ts. These
+// only govern how often the expensive LLM *suggestion* runs.
+//
+//   • Speaker-gate — on dual-channel calls (speaker is known from the audio
+//     channel) only the CANDIDATE's turn triggers a suggestion. The recruiter's
+//     words are still in the model's context, they just don't spend a call.
+//   • Silence-gate — wait for a pause, coalescing a burst of fragments into one.
+//   • Max-wait — but never withhold guidance longer than this mid-monologue.
+//   • Min-length — trivial acks ("haan", "ok") don't warrant a fresh suggestion.
+//   • Min-gap — a hard floor between two suggestions.
+const SILENCE_MS = 1800;
+const MAX_WAIT_MS = 9000;
+const MIN_TRIGGER_CHARS = 15;
+const MIN_SUGGESTION_GAP_MS = 1500;
 
 export function rememberTurn(callId: string, turn: TranscriptTurn): void {
   const c = ensureCtx(callId);
@@ -230,29 +252,84 @@ function ensureCtx(callId: string): CallContext {
 }
 
 export function dropCall(callId: string): void {
+  const c = ctx.get(callId);
+  if (c?.debounceTimer) clearTimeout(c.debounceTimer);
   ctx.delete(callId);
 }
 
-export async function maybeSuggest(
+/**
+ * Called on every final turn. Does NOT run the LLM directly — it applies the
+ * cheap gates and (re)schedules a single debounced suggestion. The turn itself
+ * is already persisted + broadcast + remembered (in the transcription layer),
+ * so gating here never affects the transcript or the model's context; it only
+ * decides whether/when to spend an LLM call.
+ */
+export function maybeSuggest(
+  callId: string,
+  triggerTurnId: number | null,
+  log: FastifyBaseLogger,
+): void {
+  const c = ensureCtx(callId);
+  if (c.turns.length === 0) return;
+  const last = c.turns[c.turns.length - 1];
+
+  // GATE 1 — speaker (dual-channel calls only). Only the CANDIDATE answering
+  // triggers a fresh suggestion; the recruiter's own turn is already in context
+  // (rememberTurn ran before this), so the model still sees the question — it
+  // just doesn't burn a call reacting to the recruiter's words. On mixed-mono
+  // the label is a diarization guess, so we must not gate there.
+  if (authoritativeSpeakerCalls.has(callId) && last.speaker === "recruiter") return;
+
+  // GATE 2 — min length. Skip trivial acknowledgements.
+  if (last.text.trim().length < MIN_TRIGGER_CHARS) return;
+
+  // GATE 3 — silence/debounce. (Re)schedule; a burst of fragments collapses to
+  // one call fired once the speaker pauses, with a max-wait cap so a talkative
+  // candidate still gets periodic guidance.
+  c.pendingTriggerTurnId = triggerTurnId ?? last.id;
+  const now = Date.now();
+  if (c.firstScheduledAt === undefined) c.firstScheduledAt = now;
+  if (c.debounceTimer) clearTimeout(c.debounceTimer);
+  const capRemaining = Math.max(0, MAX_WAIT_MS - (now - c.firstScheduledAt));
+  const delay = Math.min(SILENCE_MS, capRemaining);
+  c.debounceTimer = setTimeout(() => {
+    void fireSuggestion(callId, log);
+  }, delay);
+}
+
+/** Debounce timer elapsed — decide if we can run now, else back off briefly. */
+async function fireSuggestion(callId: string, log: FastifyBaseLogger): Promise<void> {
+  const c = ensureCtx(callId);
+  c.debounceTimer = undefined;
+  if (c.turns.length === 0) return;
+
+  // Never overlap a running suggestion, and honour the hard min-gap floor —
+  // reschedule for the remaining time instead of dropping the request.
+  const now = Date.now();
+  const sinceLast = now - c.lastSuggestionAt;
+  if (c.inFlight || sinceLast < MIN_SUGGESTION_GAP_MS) {
+    const wait = c.inFlight ? 500 : MIN_SUGGESTION_GAP_MS - sinceLast;
+    c.debounceTimer = setTimeout(() => void fireSuggestion(callId, log), Math.max(200, wait));
+    return;
+  }
+
+  c.firstScheduledAt = undefined;
+  await runSuggestion(callId, c.pendingTriggerTurnId ?? null, log);
+}
+
+/** The actual (streamed) LLM suggestion pass. Guarded by inFlight. */
+async function runSuggestion(
   callId: string,
   triggerTurnId: number | null,
   log: FastifyBaseLogger,
 ): Promise<void> {
   const c = ensureCtx(callId);
   if (c.inFlight) return;
-  const now = Date.now();
-  if (now - c.lastSuggestionAt < DEBOUNCE_MS) return;
   if (c.turns.length === 0) return;
-
-  // Fire on every final utterance. On the mixed-mono wedge the live speaker
-  // label is only a provisional diarization guess (and this same pass is what
-  // corrects it), so we can't gate on speaker === 'candidate' without starving
-  // suggestions when the guess is wrong. Running each turn also powers the
-  // Q&A-alignment guidance ("did the candidate actually answer that?").
   const last = c.turns[c.turns.length - 1];
 
   c.inFlight = true;
-  c.lastSuggestionAt = now;
+  c.lastSuggestionAt = Date.now();
   const t0 = Date.now();
   const requestId = randomUUID();
 
@@ -559,6 +636,20 @@ async function loadRecruiterContext(callId: string): Promise<RecruiterCallContex
   return ctx;
 }
 
+// Calls whose speaker labels come from real audio channels rather than from
+// diarization. Empty by default, so the mixed-mono mic path behaves exactly as
+// before — only the dual-channel FreJun path opts in (deepgram/dual-stream.ts).
+const authoritativeSpeakerCalls = new Set<string>();
+
+/** Suppress LLM speaker correction for this call — labels are ground truth. */
+export function markAuthoritativeSpeakers(callId: string): void {
+  authoritativeSpeakerCalls.add(callId);
+}
+
+export function clearAuthoritativeSpeakers(callId: string): void {
+  authoritativeSpeakerCalls.delete(callId);
+}
+
 /**
  * Apply the LLM's content-based speaker judgement to the most recent final
  * turn. No-op when the model is unsure, the turn isn't persisted yet, or the
@@ -571,6 +662,9 @@ async function relabelLastSpeaker(
   lastSpeaker: "recruiter" | "candidate" | "unclear" | undefined,
   log: FastifyBaseLogger,
 ): Promise<void> {
+  // On a two-channel capture the speaker is known from the audio itself, so an
+  // LLM guess can only make it worse — it would flip correct labels.
+  if (authoritativeSpeakerCalls.has(callId)) return;
   if (!lastSpeaker || lastSpeaker === "unclear") return;
   const role = lastSpeaker as Speaker;
   if (last.id < 0 || last.speaker === role) return;

@@ -252,7 +252,8 @@ export async function callsRoutes(app: FastifyInstance) {
       .map((r) => {
         const summary = r.summary as { kind?: string; verdict?: string; score?: { overall?: number }; summary?: string; candidateName?: string } | null;
         const ev = summary && summary.kind === "interview_eval" ? summary : null;
-        const candName = (r.candidate as { name?: string } | null)?.name ?? null;
+        const cand = r.candidate as { name?: string; email?: string; phone?: string } | null;
+        const candName = cand?.name ?? null;
         const demandTitle = (r.demandSnapshot as { title?: string } | null)?.title ?? null;
         return {
           id: r.id,
@@ -265,6 +266,8 @@ export async function callsRoutes(app: FastifyInstance) {
           recruiterEmail: r.recruiterEmail ?? null,
           demandTitle,
           candidateName: candName,
+          candidateEmail: cand?.email ?? null,
+          candidatePhone: cand?.phone ?? null,
           hasEvaluation: !!ev,
           verdict: ev?.verdict ?? null,
           overallScore: ev?.score?.overall ?? null,
