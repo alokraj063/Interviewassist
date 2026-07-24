@@ -21,6 +21,22 @@ import {
   verifyState,
 } from "../telephony/frejunOAuth.js";
 
+/** The local-part of an email, lower-cased (the bit before "@"). */
+function emailLocalPart(email: string): string {
+  return email.split("@")[0]?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * True when two emails belong to the same recruiter. Matches on the local-part
+ * so the same person on joulestowatts.co vs .com is accepted, while genuinely
+ * different accounts (a.arun vs shweta.dubey) are not.
+ */
+function sameRecruiter(olEmail: string, frejunEmail: string): boolean {
+  const a = emailLocalPart(olEmail);
+  const b = emailLocalPart(frejunEmail);
+  return a.length > 0 && a === b;
+}
+
 /** Minimal self-closing page for the popup the frontend opens. */
 function closingPage(ok: boolean, message: string): string {
   const payload = JSON.stringify({ source: "frejun-oauth", ok, message });
@@ -105,6 +121,22 @@ export async function telephonyOAuthRoutes(app: FastifyInstance) {
       req.log.warn({ email: q.email }, "frejun oauth callback with no matching pending grant");
       return reply.send(
         closingPage(false, "No matching authorization request. Please start again from the app."),
+      );
+    }
+
+    // IDENTITY GUARD — the FreJun account must belong to the SAME recruiter who
+    // is logged into OfferLetter. FreJun lets a user sign in as anyone, so
+    // without this a recruiter (a.arun) could grant someone else's FreJun
+    // account (shweta.dubey) and then place calls under the wrong identity.
+    // Compare the local-part (before @) so joulestowatts.co vs .com for the
+    // same person still passes, but different people are rejected.
+    if (q.email && !sameRecruiter(email, q.email)) {
+      req.log.warn({ olEmail: email, frejunEmail: q.email }, "frejun account mismatch — rejected");
+      return reply.send(
+        closingPage(
+          false,
+          `You're signed in as ${email}, but you connected FreJun as ${q.email}. Please connect FreJun with your OWN account.`,
+        ),
       );
     }
 
