@@ -250,9 +250,20 @@ export async function getAccessToken(
     const next = await refresh(doc);
     return { accessToken: next.accessToken, email: next.frejunEmail, expiresAt: next.expiresAt };
   } catch {
-    // Refresh failed (revoked / expired grant). Return what we have and let the
-    // SDK surface InvalidTokenException — the UI then re-runs the grant.
-    return { accessToken: doc.accessToken, email: doc.frejunEmail, expiresAt: doc.expiresAt };
+    // Refresh failed (revoked / expired grant, or a transient network blip).
+    const stillValid = !doc.expiresAt || doc.expiresAt.getTime() > Date.now();
+    if (stillValid) {
+      // The current access token hasn't actually expired yet (or we can't tell) —
+      // keep using it and retry the refresh on the next call.
+      return { accessToken: doc.accessToken, email: doc.frejunEmail, expiresAt: doc.expiresAt };
+    }
+    // The access token IS expired and it can't be refreshed → the connection is
+    // dead. Drop it so /status reports `connected: false` and /token returns 409,
+    // which flips the UI to "Connect FreJun" and forces a fresh grant — instead
+    // of showing a green "connected" chip while every call silently fails on an
+    // expired token.
+    await tokens().deleteOne({ olUid: uid }).catch(() => {});
+    return null;
   }
 }
 
