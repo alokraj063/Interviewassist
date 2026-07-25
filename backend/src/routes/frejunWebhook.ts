@@ -213,18 +213,10 @@ async function handleEvent(body: FrejunWebhookBody, req: FastifyRequest): Promis
     return;
   }
 
-  let mapped = mapFrejunStatus(body.call_status ?? body.status);
+  const mapped = mapFrejunStatus(body.call_status ?? body.status);
   if (!mapped) {
     req.log.warn({ callId, raw: body.call_status ?? body.status }, "unmapped frejun status");
     return;
-  }
-  // A real pickup ALWAYS carries an `answer_time`. FreJun also emits an
-  // "in progress"/"ongoing" webhook while the candidate's phone is still RINGING
-  // (no answer_time yet) — mapping that to "answered" lit up "On call" + the timer
-  // before anyone picked up. Hold it at "ringing" until answer_time arrives; the
-  // poll watcher still catches the true pickup as a safety net.
-  if (mapped === "answered" && !body.answer_time) {
-    mapped = "ringing";
   }
 
   const patch: Record<string, unknown> = {};
