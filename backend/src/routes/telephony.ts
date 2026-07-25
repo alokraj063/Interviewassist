@@ -440,11 +440,17 @@ export async function telephonyRoutes(app: FastifyInstance) {
               ? await findCallById(String(call.telephony.frejunCallId))
               : null);
           if (remote) {
-            // The call-log's `call_start_time` is the answer timestamp — null
-            // while the phone is still ringing. Gate "answered" behind it so a
-            // mid-ring reconcile poll can't start "On call" + the timer early.
             const mapped = mapFrejunStatus(remote.status, Boolean(remote.call_start_time));
-            if (mapped) {
+            // The reconcile (a webhook-MISS backfill, but polled by the client) must
+            // NEVER drive the "answered" transition. On an OUTBOUND call FreJun's
+            // call-log flips to "ongoing" + sets `call_start_time` the moment the
+            // RECRUITER's own browser leg joins the FreJun bridge — while the
+            // candidate's phone is still RINGING. Trusting that lit up "On call" +
+            // the timer + the live transcript before anyone picked up. Only the
+            // webhook's `answer_time` marks the CANDIDATE actually answering, so the
+            // reconcile backfills every state EXCEPT "answered" (and "ringing", which
+            // it should never regress the webhook's progress with).
+            if (mapped && mapped !== "answered" && mapped !== "ringing") {
               await applyStatus({
                 callId: req.params.id,
                 status: mapped,
