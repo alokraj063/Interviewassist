@@ -69,6 +69,12 @@ export const collections = {
   // résumés when the recruiter searches the OfferLetter pool.
   olCandidateProfiles:  () => col("candidateProfiles"),
   olCandidateDocuments: () => col("candidateDocuments"),
+  // Pre-parsed résumé data OL already extracted (skills, experience, phone,
+  // location). Read this instead of re-fetching + AI-parsing the résumé so the
+  // candidate loads in ~50ms rather than ~20s.
+  olParsedResumes:      () => col("parsedResumeDetails"),
+  // Candidate contact details — primaryPhone for the call.
+  olUserDetails:        () => col("userDetails"),
   // Human-refined demand calibration (one doc per (jobPostingId, version)).
   olDemandCalibrations: () => col("demand_calibration"),
 
