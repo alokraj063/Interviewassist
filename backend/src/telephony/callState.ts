@@ -52,21 +52,32 @@ export function isTerminal(status: TelephonyStatus): boolean {
  * Unknown values map to null so the caller can log and ignore rather than
  * corrupt state.
  */
-export function mapFrejunStatus(raw: string | null | undefined): TelephonyStatus | null {
+export function mapFrejunStatus(
+  raw: string | null | undefined,
+  hasAnswerTime?: boolean,
+): TelephonyStatus | null {
   // FreJun pads some live values with trailing dots ("ongoing..") — observed in
   // the wild, not documented. Strip them before matching.
   const s = (raw ?? "").trim().toLowerCase().replace(/\.+$/, "");
   if (!s) return null;
+  // A real pickup ALWAYS carries an answer timestamp (webhook `answer_time`,
+  // call-log `call_start_time`). FreJun reports "ongoing"/"in progress" (and the
+  // webhook an "answered" event) WHILE THE PHONE IS STILL RINGING, with no
+  // answer time yet — mapping that to "answered" lit up "On call" + the timer +
+  // the live transcript before anyone picked up. When the caller passes
+  // hasAnswerTime === false we hold at "ringing" until the answer time arrives.
+  const answeredGate = (mapped: TelephonyStatus): TelephonyStatus =>
+    hasAnswerTime === false ? "ringing" : mapped;
   // While a call is UP, the call-log status is "ongoing" — a value that appears
   // nowhere in the docs and that only shows during the call. Once the call
   // ends the same record flips to "answered". So "ongoing" is the real
   // candidate-picked-up signal; "answered" alone arrives too late to start
   // transcribing. (End-of-call is detected from call_end_time, not from the
   // status string — see telephony/watcher.ts.)
-  if (s === "ongoing" || s.includes("in progress") || s.includes("in-progress")) return "answered";
+  if (s === "ongoing" || s.includes("in progress") || s.includes("in-progress")) return answeredGate("answered");
   if (s.includes("outbound") && s.includes("initiated")) return "dialing";
   if (s.includes("inbound") && s.includes("initiated")) return "ringing";
-  if (s === "answered" || s.includes("call answered")) return "answered";
+  if (s === "answered" || s.includes("call answered")) return answeredGate("answered");
   if (s === "completed" || s.includes("call completed")) return "completed";
   if (s === "busy" || s.includes("call busy")) return "busy";
   if (s === "not-answered" || s === "user-not-answered" || s.includes("not answered")) {
@@ -121,11 +132,15 @@ export async function applyStatus(input: ApplyStatusInput): Promise<boolean> {
 
   await collections.interviews().updateOne(
     { id: callId },
-    {
-      $set: set,
-      // The status history IS the call log the UI renders.
-      $push: { "telephony.statusHistory": { status, at: now, source } },
-    } as never,
+    // Repeats (e.g. the frontend's mid-ring reconcile poll firing "ringing"
+    // every couple of seconds) refresh `patch` but must NOT push a duplicate
+    // history entry — the status history IS the call log the UI renders.
+    isRepeat
+      ? ({ $set: set } as never)
+      : ({
+          $set: set,
+          $push: { "telephony.statusHistory": { status, at: now, source } },
+        } as never),
   );
 
   if (isRepeat) return true;

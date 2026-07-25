@@ -440,7 +440,10 @@ export async function telephonyRoutes(app: FastifyInstance) {
               ? await findCallById(String(call.telephony.frejunCallId))
               : null);
           if (remote) {
-            const mapped = mapFrejunStatus(remote.status);
+            // The call-log's `call_start_time` is the answer timestamp — null
+            // while the phone is still ringing. Gate "answered" behind it so a
+            // mid-ring reconcile poll can't start "On call" + the timer early.
+            const mapped = mapFrejunStatus(remote.status, Boolean(remote.call_start_time));
             if (mapped) {
               await applyStatus({
                 callId: req.params.id,

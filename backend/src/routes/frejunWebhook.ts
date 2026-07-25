@@ -213,7 +213,9 @@ async function handleEvent(body: FrejunWebhookBody, req: FastifyRequest): Promis
     return;
   }
 
-  const mapped = mapFrejunStatus(body.call_status ?? body.status);
+  // A real pickup ALWAYS carries an `answer_time`; an "ongoing"/"answered"
+  // webhook without one is still just RINGING (see mapFrejunStatus).
+  const mapped = mapFrejunStatus(body.call_status ?? body.status, Boolean(body.answer_time));
   if (!mapped) {
     req.log.warn({ callId, raw: body.call_status ?? body.status }, "unmapped frejun status");
     return;
