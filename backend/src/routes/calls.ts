@@ -51,7 +51,7 @@ const ephemeralCandidateSchema = z.object({
 }).strict();
 
 const createSchema = z.object({
-  // `demandId` is OL's `jobPostings._id` (hex string) — the recruiter must
+  // `demandId` is OL's `jobPostings.uid` (16-char nanoid) — the recruiter must
   // be assigned to it via jobAssignMappings.
   demandId: z.string().optional(),
   // Old multi-tenant fields kept tolerant so a still-warm client doesn't
@@ -73,6 +73,7 @@ function wsUrls(callId: string, mode: string) {
 interface OlJobPosting {
   _id: ObjectId;
   uid: string;
+  createdById?: ObjectId;
   title?: string;
   designation?: string;
   primaryLocation?: string;
@@ -97,18 +98,20 @@ async function resolveAssigneeIds(ctx: { mongoId: string; role: string }): Promi
   return [selfId, ...ams.map((a) => a._id)];
 }
 
-async function loadOlJob(jobId: string, ctx: { mongoId: string; role: string }) {
-  let oid: ObjectId;
-  try { oid = new ObjectId(jobId); }
-  catch { return null; }
+// `jobUid` is OL's business uid (16-char nanoid), NOT the Mongo _id. Resolve
+// the posting by uid, then verify assignment via its real _id.
+async function loadOlJob(jobUid: string, ctx: { mongoId: string; role: string }) {
+  const job = await collections.olJobPostings().findOne<OlJobPosting>({ uid: jobUid });
+  if (!job) return null;
+  // Same ownership scope as OL's /matching/jobs: created by me OR assigned to me.
+  const selfId = new ObjectId(ctx.mongoId);
+  if (job.createdById && job.createdById.equals(selfId)) return job;
   const assigneeIds = await resolveAssigneeIds(ctx);
   const mapping = await collections.olJobAssignMappings().findOne({
     userId: { $in: assigneeIds },
-    jobPostingId: oid,
+    jobPostingId: job._id,
   });
-  if (!mapping) return null;
-  const job = await collections.olJobPostings().findOne<OlJobPosting>({ _id: oid });
-  return job ?? null;
+  return mapping ? job : null;
 }
 
 export async function callsRoutes(app: FastifyInstance) {
@@ -140,7 +143,7 @@ export async function callsRoutes(app: FastifyInstance) {
         clientName = c?.companyName ?? null;
       }
       demandSnapshot = {
-        id: job._id.toHexString(),
+        id: job.uid,        // uid is the canonical demand identifier everywhere
         uid: job.uid,
         title: job.title ?? null,
         designation: job.designation ?? null,
@@ -259,6 +262,7 @@ export async function callsRoutes(app: FastifyInstance) {
           id: r.id,
           status: r.status,
           mode: r.mode,
+          direction: (r.direction as string) ?? "outbound",
           startedAt: r.startedAt,
           endedAt: r.endedAt,
           candidateRefOrPhone: r.candidateRefOrPhone ?? null,

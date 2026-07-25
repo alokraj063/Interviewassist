@@ -11,6 +11,7 @@ import { collections } from "../mongo.js";
 export interface OlJobPosting {
   _id: ObjectId;
   uid: string;
+  createdById?: ObjectId;
   title?: string;
   designation?: string;
   primaryLocation?: string;
@@ -42,24 +43,30 @@ export async function resolveAssigneeIds(ctx: { mongoId: string; role: string })
   return [selfId, ...ams.map((a) => a._id)];
 }
 
-/** The job posting, or null when it doesn't exist OR the caller isn't assigned. */
+/**
+ * The job posting, or null when it doesn't exist OR the caller isn't assigned.
+ *
+ * `jobUid` is OL's business **uid** (a 16-char nanoid), NOT the Mongo `_id`.
+ * We resolve the posting by uid, then verify assignment via the mapping using
+ * the posting's real `_id` (jobAssignMappings.jobPostingId is still an ObjectId).
+ */
 export async function loadOlJob(
-  jobId: string,
+  jobUid: string,
   ctx: { mongoId: string; role: string },
 ): Promise<OlJobPosting | null> {
-  let oid: ObjectId;
-  try {
-    oid = new ObjectId(jobId);
-  } catch {
-    return null;
-  }
+  const job = await collections.olJobPostings().findOne<OlJobPosting>({ uid: jobUid });
+  if (!job) return null;
+  // Ownership scope must match OL's /matching/jobs (the list the demand came
+  // from): the recruiter CREATED it OR is assigned to it. Assignment-only would
+  // reject a demand the recruiter created but never self-assigned.
+  const selfId = new ObjectId(ctx.mongoId);
+  if (job.createdById && job.createdById.equals(selfId)) return job;
   const assigneeIds = await resolveAssigneeIds(ctx);
   const mapping = await collections.olJobAssignMappings().findOne({
     userId: { $in: assigneeIds },
-    jobPostingId: oid,
+    jobPostingId: job._id,
   });
-  if (!mapping) return null;
-  return (await collections.olJobPostings().findOne<OlJobPosting>({ _id: oid })) ?? null;
+  return mapping ? job : null;
 }
 
 /** The inline `demandSnapshot` written onto an interview document. */
@@ -70,7 +77,7 @@ export async function buildDemandSnapshot(job: OlJobPosting): Promise<Record<str
     clientName = c?.companyName ?? null;
   }
   return {
-    id: job._id.toHexString(),
+    id: job.uid,          // uid is the canonical demand identifier everywhere
     uid: job.uid,
     title: job.title ?? null,
     designation: job.designation ?? null,

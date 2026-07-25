@@ -20,6 +20,7 @@ import { buildQuestionBankReport, type QuestionBank } from "../reports/questionB
 interface OlJobPosting {
   _id: ObjectId;
   uid: string;
+  createdById?: ObjectId;
   title?: string;
   designation?: string;
   status?: string;
@@ -67,8 +68,8 @@ interface OlDemandCalibration {
 // the React Query hook + zod types in the inter/frontend port still work.
 function adaptDemand(jp: OlJobPosting, clientName: string | null) {
   return {
-    id: jp._id.toHexString(),                  // we use the Mongo _id as the API id
-    uid: jp.uid,                               // OL's business UID — handy for logging
+    id: jp.uid,                                // uid is the canonical demand id (matches OL /matching/jobs)
+    uid: jp.uid,                               // OL's business UID — same value, kept for callers that read `uid`
     title: jp.title ?? null,
     designation: jp.designation ?? null,
     status: (jp.status || (jp.isActive === false ? "closed" : "active")).toLowerCase(),
@@ -100,6 +101,17 @@ async function resolveAssigneeIds(ctx: { mongoId: string; role: string }): Promi
     .project({ _id: 1 })
     .toArray();
   return [selfId, ...ams.map((a) => a._id)];
+}
+
+// Ownership scope MUST match OL's /matching/jobs (the list the demand came
+// from): the recruiter CREATED the job OR is assigned to it. Assignment-only
+// would 404/403 a demand the recruiter created but never self-assigned.
+async function recruiterOwnsJob(job: OlJobPosting, ctx: { mongoId: string; role: string }): Promise<boolean> {
+  const selfId = new ObjectId(ctx.mongoId);
+  if (job.createdById && job.createdById.equals(selfId)) return true;
+  const assigneeIds = await resolveAssigneeIds(ctx);
+  const mapping = await collections.olJobAssignMappings().findOne({ userId: { $in: assigneeIds }, jobPostingId: job._id });
+  return !!mapping;
 }
 
 export async function demandsRoutes(app: FastifyInstance) {
@@ -138,22 +150,15 @@ export async function demandsRoutes(app: FastifyInstance) {
   });
 
   // Demand detail — same scoping (must be one of the recruiter's jobs).
+  // `:id` is the OL business uid (16-char nanoid), not the Mongo _id.
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const ctx = req.authUser!;
-    let jobOid: ObjectId;
-    try { jobOid = new ObjectId(req.params.id); }
-    catch { return reply.code(400).send({ error: "invalid_id" }); }
 
-    // Ownership check — same scope as the listing.
-    const assigneeIds = await resolveAssigneeIds(ctx);
-    const mapping = await collections.olJobAssignMappings().findOne({
-      userId: { $in: assigneeIds },
-      jobPostingId: jobOid,
-    });
-    if (!mapping) return reply.code(404).send({ error: "demand_not_found_or_unassigned" });
-
-    const job = await collections.olJobPostings().findOne<OlJobPosting>({ _id: jobOid });
+    const job = await collections.olJobPostings().findOne<OlJobPosting>({ uid: req.params.id });
     if (!job) return reply.code(404).send({ error: "demand_not_found" });
+
+    // Ownership check — same scope as the listing (created OR assigned).
+    if (!(await recruiterOwnsJob(job, ctx))) return reply.code(404).send({ error: "demand_not_found_or_unassigned" });
 
     let clientName: string | null = null;
     if (job.clientId) {
@@ -190,19 +195,16 @@ export async function demandsRoutes(app: FastifyInstance) {
   interface QuestionBankDoc { demandId: string; recruiterUid: string; assessmentNotes: string; versions: BankVersion[]; updatedAt: Date }
 
   // Resolve a jobPosting the caller is allowed to see, or send the error reply.
+  // `id` is the OL business uid (16-char nanoid), not the Mongo _id.
   async function loadOwnedJob(
     req: FastifyRequest,
     reply: FastifyReply,
     id: string,
   ): Promise<OlJobPosting | null> {
     const ctx = req.authUser!;
-    let jobOid: ObjectId;
-    try { jobOid = new ObjectId(id); } catch { reply.code(400).send({ error: "invalid_id" }); return null; }
-    const assigneeIds = await resolveAssigneeIds(ctx);
-    const mapping = await collections.olJobAssignMappings().findOne({ userId: { $in: assigneeIds }, jobPostingId: jobOid });
-    if (!mapping) { reply.code(404).send({ error: "demand_not_found_or_unassigned" }); return null; }
-    const job = await collections.olJobPostings().findOne<OlJobPosting>({ _id: jobOid });
+    const job = await collections.olJobPostings().findOne<OlJobPosting>({ uid: id });
     if (!job) { reply.code(404).send({ error: "demand_not_found" }); return null; }
+    if (!(await recruiterOwnsJob(job, ctx))) { reply.code(404).send({ error: "demand_not_found_or_unassigned" }); return null; }
     return job;
   }
 

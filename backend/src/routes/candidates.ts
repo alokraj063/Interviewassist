@@ -172,7 +172,7 @@ export async function candidatesRoutes(app: FastifyInstance) {
     const users = await collections.olUsers()
       .find<OlCandUser>(
         { type: "UserCandidate", $or: [{ firstName: anchored }, { lastName: anchored }, { email: anchored }] },
-        { projection: { firstName: 1, middleName: 1, lastName: 1, email: 1 } },
+        { projection: { uid: 1, firstName: 1, middleName: 1, lastName: 1, email: 1 } },
       )
       .limit(limit)
       .toArray();
@@ -195,7 +195,8 @@ export async function candidatesRoutes(app: FastifyInstance) {
         designation?: string; employer?: string; totalExperience?: number; currentLocation?: string;
       };
       return {
-        userId: String(u._id),
+        uid: u.uid ?? null,               // canonical candidate id (matches /matching/candidates)
+        userId: String(u._id),            // legacy alias
         name: candidateName(u),
         email: (u.email as string) ?? null,
         currentTitle: p.designation ?? null,
@@ -213,58 +214,83 @@ export async function candidatesRoutes(app: FastifyInstance) {
   // stash it in our blob store so the report can merge the original file.
   // Falls back to the OL profile fields when the file can't be fetched/parsed.
   app.post("/from-offer-letter", async (req, reply) => {
-    const userId = String(((req.body ?? {}) as { userId?: string }).userId ?? "").trim();
-    let oid: ObjectId;
-    try { oid = new ObjectId(userId); } catch { return reply.code(400).send({ error: "invalid_user_id" }); }
+    // Candidate identifier is the OL business `uid` (16-char nanoid) — same id
+    // OL's /matching/candidates returns. `userId` is accepted as a legacy alias.
+    const body = (req.body ?? {}) as { uid?: string; userId?: string };
+    const candUid = String(body.uid ?? body.userId ?? "").trim();
+    if (!candUid) return reply.code(400).send({ error: "invalid_candidate_id" });
 
     const user = await collections.olUsers().findOne<OlCandUser>(
-      { _id: oid, type: "UserCandidate" },
+      { uid: candUid, type: "UserCandidate" },
       { projection: { uid: 1, firstName: 1, middleName: 1, lastName: 1, email: 1 } },
     );
     if (!user) return reply.code(404).send({ error: "candidate_not_found" });
+    const oid = user._id;
 
-    const profile = await collections.olCandidateProfiles().findOne<{
-      designation?: string; employer?: string; totalExperience?: number; currentLocation?: string;
-    }>({ userId: oid }, { projection: { designation: 1, employer: 1, totalExperience: 1, currentLocation: 1 } });
+    // Everything comes from the DB. OL already parsed the résumé, so we read the
+    // stored fields (parsedResumeDetails) instead of re-fetching the file from S3
+    // and re-running the AI parser — which is what made this endpoint take ~20s.
+    // All three reads run in parallel; the response is a few DB round-trips (~50ms).
+    const [profile, pr, detail] = await Promise.all([
+      collections.olCandidateProfiles().findOne<{
+        designation?: string; employer?: string; totalExperience?: number; currentLocation?: string;
+      }>({ userId: oid }, { projection: { designation: 1, employer: 1, totalExperience: 1, currentLocation: 1 } }),
+      collections.olParsedResumes().findOne<{
+        personalInfo?: { fullName?: string; email?: string; phone?: string; currentLocation?: string };
+        skills?: string[];
+        experienceDetails?: Array<{ company?: string; designation?: string; location?: string; years?: number }>;
+        educationDetails?: unknown[];
+        totalYearsExperience?: number;
+        summary?: string;
+      }>({ userId: oid, resumeStatus: "parsed" }, { sort: { parsedAt: -1, updatedAt: -1 } }),
+      collections.olUserDetails().findOne<{ primaryPhone?: string }>(
+        { userId: oid }, { projection: { primaryPhone: 1 } },
+      ),
+    ]);
 
-    let parsed: Record<string, unknown> = {};
-    let blobKey: string | null = null;
-    let filename: string | null = null;
-    let mime: string | null = null;
+    const topExp = pr?.experienceDetails?.[0] ?? {};
+    const currentTitle    = topExp.designation ?? profile?.designation ?? null;
+    const currentCompany  = topExp.company     ?? profile?.employer    ?? null;
+    const currentLocation = pr?.personalInfo?.currentLocation || profile?.currentLocation || null;
+    const totalExperienceYears =
+      (typeof pr?.totalYearsExperience === "number" && pr.totalYearsExperience > 0)
+        ? pr.totalYearsExperience
+        : (typeof profile?.totalExperience === "number" ? profile.totalExperience : null);
+    const phone = detail?.primaryPhone || pr?.personalInfo?.phone || null;
 
-    // Fetch the résumé from OL's S3 by listing candidate_documents/<id>/resume/
-    // (try the short uid first, then the _id hex).
-    try {
-      const found = await fetchOlResume([user.uid ?? "", String(user._id)]);
-      if (found?.buf?.length) {
-        filename = found.filename;
-        mime = mimeForExt(filename);
-        blobKey = (await blobStore.put(found.buf)).key;
-        const { text } = await parseDocument(found.buf, mime, filename);
-        if (text.trim().length >= 50) {
-          const { parsed: p } = await extractResumeFields(text, req.log);
-          parsed = p as unknown as Record<string, unknown>;
+    // Compact `parsed` payload for the live-assist suggestion engine — built from
+    // the stored parse, no re-parsing.
+    const parsed: Record<string, unknown> = pr
+      ? {
+          fullName: pr.personalInfo?.fullName ?? candidateName(user),
+          email: pr.personalInfo?.email ?? (user.email as string) ?? null,
+          phone,
+          currentTitle,
+          currentCompany,
+          currentLocation,
+          totalYearsExperience: pr.totalYearsExperience ?? null,
+          skills: pr.skills ?? [],
+          experience: pr.experienceDetails ?? [],
+          education: pr.educationDetails ?? [],
+          summary: pr.summary ?? "",
         }
-      }
-    } catch (err) {
-      if (err instanceof ResumeExtractionError && err.code === "openai_not_configured") {
-        return reply.code(503).send({ error: "openai_not_configured" });
-      }
-      req.log.warn({ err: (err as Error).message, userId }, "ol_resume_fetch_or_parse_failed");
-    }
+      : {};
 
     return {
       userId: String(user._id),
       name: candidateName(user),
       email: (user.email as string) ?? null,
-      currentTitle: (parsed.currentTitle as string) ?? profile?.designation ?? null,
-      currentCompany: (parsed.currentCompany as string) ?? profile?.employer ?? null,
-      totalExperienceYears: typeof profile?.totalExperience === "number" ? profile.totalExperience : null,
-      currentLocation: (parsed.currentLocation as string) ?? profile?.currentLocation ?? null,
+      phone,
+      currentTitle,
+      currentCompany,
+      totalExperienceYears,
+      currentLocation,
       parsed,
-      blobKey,
-      filename,
-      mime,
+      // The résumé blob (for the report) is fetched lazily elsewhere — keeping it
+      // off this hot path is what makes the candidate load instant.
+      blobKey: null,
+      filename: null,
+      mime: null,
     };
   });
 
