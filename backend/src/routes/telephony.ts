@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { collections } from "../mongo.js";
+import { candidateIdentity } from "../lib/candidateIdentity.js";
 import { env } from "../env.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
 import { buildDemandSnapshot, loadOlJob } from "../lib/olJobs.js";
@@ -37,6 +38,11 @@ const transcriptionChoiceSchema = z.object({
 // from a manually-created one everywhere downstream.
 const ephemeralCandidateSchema = z
   .object({
+    // OfferLetter candidate `uid` — see lib/candidateIdentity.ts. Without it a
+    // call can't be joined back to a person, which is what the notes feature
+    // needs. NOTE the `.strict()` below: before this field existed, a client
+    // sending `uid` had its whole request rejected.
+    uid: z.string().max(64).optional(),
     name: z.string().min(1).max(200).optional(),
     email: z.string().email().optional(),
     phone: z.string().max(40).optional(),
@@ -132,6 +138,13 @@ export async function telephonyRoutes(app: FastifyInstance) {
         // "server" — we dial through /integrations/call-to-voip/, which needs
         //            a resolvable agent_id.
         dialMode: z.enum(["sdk", "server"]).default("sdk"),
+        // WHICH SURFACE placed this call. Both the Interview Assist session and
+        // the Dialer come through this one route, so `origin` ("telephony") can
+        // never tell them apart. Everything downstream that has to distinguish
+        // them — notably which notes are interview notes and which are plain
+        // call notes — reads this. Optional so an older client still works; the
+        // presence of a demand is the legacy tell-tale we fall back to.
+        purpose: z.enum(["interview_assist", "dialer"]).optional(),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -184,11 +197,15 @@ export async function telephonyRoutes(app: FastifyInstance) {
       recruiterName: ctx.name,
       candidate: d.candidate ?? null,
       candidateRefOrPhone: dstnNumber,
+      // Flat, indexable identity so this call — and its notes — can be pulled
+      // up per candidate later. See lib/candidateIdentity.ts.
+      ...candidateIdentity(d.candidate, dstnNumber),
       demandId: d.demandId ?? null,
       demandSnapshot,
       status: "assigned",
       mode,
       origin: "telephony",
+      purpose: d.purpose ?? (d.demandId ? "interview_assist" : "dialer"),
       transcriberProvider: transcription.provider,
       transcriberModel: transcription.model,
       transcriberLanguage: transcription.language,
@@ -377,11 +394,16 @@ export async function telephonyRoutes(app: FastifyInstance) {
       recruiterName: ctx.name,
       candidate,
       candidateRefOrPhone: number,
+      // An inbound caller usually has no uid, so the normalised number becomes
+      // the key — which is what groups repeat calls from the same person.
+      ...candidateIdentity(candidate, number),
       demandId: d.demandId ?? null,
       demandSnapshot,
       status: "assigned",
       mode: "browser_mixed",
       origin: "telephony",
+      // The candidate called US — neither an interview nor a dial-out.
+      purpose: "inbound",
       transcriberProvider: transcription.provider,
       transcriberModel: transcription.model,
       transcriberLanguage: transcription.language,
@@ -423,7 +445,10 @@ export async function telephonyRoutes(app: FastifyInstance) {
   //
   // Everything still goes through applyStatus, so the rank guard keeps a late
   // browser report from clobbering a webhook that already moved the call on.
-  const SDK_REPORTABLE = ["answered", "completed", "not-answered", "failed"] as const;
+  // "declined" is browser-only knowledge for an inbound call: FreJun reports a
+  // refused call the same way it reports one nobody reached, so only the tab
+  // that rendered the Decline button knows which happened.
+  const SDK_REPORTABLE = ["answered", "completed", "declined", "not-answered", "failed"] as const;
   app.post<{ Params: { id: string } }>("/calls/:id/status", async (req, reply) => {
     const parsed = z
       .object({ status: z.enum(SDK_REPORTABLE) })
