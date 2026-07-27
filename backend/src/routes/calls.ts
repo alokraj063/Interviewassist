@@ -258,11 +258,19 @@ export async function callsRoutes(app: FastifyInstance) {
         const cand = r.candidate as { name?: string; email?: string; phone?: string } | null;
         const candName = cand?.name ?? null;
         const demandTitle = (r.demandSnapshot as { title?: string } | null)?.title ?? null;
+        // Direction lives on the `telephony` sub-document (routes/telephony.ts
+        // and the webhook both write it there) — the top-level `r.direction`
+        // this used to read has never existed, so EVERY call reported
+        // "outbound" and the UI's Incoming tab was permanently empty.
+        // The top-level read is kept as a fallback for any legacy row.
+        const tel = r.telephony as { direction?: string; status?: string; candidateNumber?: string } | null;
         return {
           id: r.id,
           status: r.status,
           mode: r.mode,
-          direction: (r.direction as string) ?? "outbound",
+          direction: tel?.direction ?? (r.direction as string) ?? "outbound",
+          /** FreJun lifecycle state (ringing / answered / not-answered / …). */
+          telephonyStatus: tel?.status ?? null,
           startedAt: r.startedAt,
           endedAt: r.endedAt,
           candidateRefOrPhone: r.candidateRefOrPhone ?? null,
@@ -271,7 +279,10 @@ export async function callsRoutes(app: FastifyInstance) {
           demandTitle,
           candidateName: candName,
           candidateEmail: cand?.email ?? null,
-          candidatePhone: cand?.phone ?? null,
+          // An INBOUND call has no candidate record — the only number we know is
+          // the caller's. Falling back to it keeps the log row dialable
+          // ("Call Now") instead of rendering a phone-less orphan.
+          candidatePhone: cand?.phone ?? tel?.candidateNumber ?? r.candidateRefOrPhone ?? null,
           hasEvaluation: !!ev,
           verdict: ev?.verdict ?? null,
           overallScore: ev?.score?.overall ?? null,

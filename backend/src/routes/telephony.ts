@@ -70,6 +70,17 @@ export function normalizeIndianNumber(raw: string): string | null {
   return null;
 }
 
+/**
+ * How far back /calls/attach will look for an in-flight inbound call from the
+ * same number when it has no `frejunCallId` to key on.
+ *
+ * Attach is only ever called while the phone is RINGING, so this needs to cover
+ * one ring (plus a page reload mid-ring), not a whole conversation. Keeping it
+ * short bounds the damage if a record is ever left stuck at "ringing" — e.g.
+ * the browser was closed before the end could be reported.
+ */
+const RECENT_INBOUND_MS = 5 * 60 * 1000;
+
 function wsUrls(callId: string, mode: string) {
   const base = env.API_PUBLIC_URL.replace(/^http/, "ws").replace(/\/$/, "");
   return {
@@ -272,15 +283,27 @@ export async function telephonyRoutes(app: FastifyInstance) {
 
   // ── Attach an INBOUND call to an interview ─────────────────────────────
   // Inbound calls originate at FreJun, so they carry no transaction_id and no
-  // interview exists yet. The browser calls this the moment the recruiter
-  // accepts, to obtain the callId it needs for /ws/session and /ws/ingest-call.
-  // Keyed on frejunCallId so a double-accept is idempotent.
+  // interview exists yet. The browser calls this the moment the phone RINGS —
+  // not on accept — so a declined or missed call still lands in the call log,
+  // which is what a call log is for. It also yields the callId needed for
+  // /ws/session and /ws/ingest-call once the recruiter picks up.
+  //
+  // `frejunCallId` is OPTIONAL because the softphone SDK never exposes it: its
+  // `onInvite` handler surfaces only the caller's display name (see
+  // UserAgent.js#onInvite), so the browser genuinely cannot know FreJun's id.
+  // The webhook backfills it later by matching on the caller's number.
+  //
+  // Idempotency therefore has two keys: frejunCallId when we have one, and
+  // otherwise "this recruiter's live inbound call from this number", so a
+  // remount or a double-fire during one ring reuses the same record.
   app.post("/calls/attach", async (req, reply) => {
     const ctx = req.authUser!;
     const parsed = z
       .object({
-        frejunCallId: z.string().min(1).max(64),
+        frejunCallId: z.string().min(1).max(64).optional(),
         candidateNumber: z.string().max(40).optional(),
+        /** Caller name, when the browser matched the number to a known candidate. */
+        candidateName: z.string().max(200).optional(),
         demandId: z.string().optional(),
         candidate: ephemeralCandidateSchema.optional(),
         transcription: transcriptionChoiceSchema.optional(),
@@ -290,12 +313,33 @@ export async function telephonyRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_payload", issues: parsed.error.flatten() });
     }
     const d = parsed.data;
+    const number = d.candidateNumber ? normalizeIndianNumber(d.candidateNumber) : null;
 
-    const existing = await collections.interviews().findOne<InterviewTelephonyDoc>({
-      "telephony.frejunCallId": d.frejunCallId,
-    });
+    const existing = d.frejunCallId
+      ? await collections.interviews().findOne<InterviewTelephonyDoc>({
+          "telephony.frejunCallId": d.frejunCallId,
+        })
+      : // No id to key on: reuse an inbound call from the same number that this
+        // recruiter is still on. Bounded by RECENT_INBOUND_MS so yesterday's
+        // call from the same candidate is never resurrected.
+        await collections.interviews().findOne<InterviewTelephonyDoc>(
+          {
+            recruiterUserId: ctx.uid,
+            "telephony.direction": "inbound",
+            "telephony.candidateNumber": number,
+            "telephony.status": { $in: ["ringing", "answered"] },
+            createdAt: { $gte: new Date(Date.now() - RECENT_INBOUND_MS) },
+          },
+          { sort: { createdAt: -1 } },
+        );
     if (existing) {
       if (existing.recruiterUserId !== ctx.uid) return reply.code(403).send({ error: "not_your_call" });
+      // A later delivery may know the FreJun id the first one didn't.
+      if (d.frejunCallId && !existing.telephony?.frejunCallId) {
+        await collections
+          .interviews()
+          .updateOne({ id: existing.id }, { $set: { "telephony.frejunCallId": d.frejunCallId } });
+      }
       return { callId: existing.id, attached: false, ...wsUrls(existing.id, "browser_mixed") };
     }
 
@@ -314,16 +358,24 @@ export async function telephonyRoutes(app: FastifyInstance) {
       demandSnapshot = await buildDemandSnapshot(job);
     }
 
-    const number = d.candidateNumber ? normalizeIndianNumber(d.candidateNumber) : null;
     const id = randomUUID();
     const now = new Date();
+    // The Call Logs list groups by candidate and renders a "Call Now" button
+    // from `candidate.phone`, so an inbound call with a null candidate would
+    // show up as an undialable "Unknown candidate". Synthesize the minimum
+    // record from what the ring gave us.
+    const candidate =
+      d.candidate ??
+      (number || d.candidateName
+        ? { ...(d.candidateName ? { name: d.candidateName } : {}), ...(number ? { phone: number } : {}) }
+        : null);
     await collections.interviews().insertOne({
       id,
       recruiterUserId: ctx.uid,
       recruiterMongoId: ctx.mongoId,
       recruiterEmail: ctx.email,
       recruiterName: ctx.name,
-      candidate: d.candidate ?? null,
+      candidate,
       candidateRefOrPhone: number,
       demandId: d.demandId ?? null,
       demandSnapshot,
@@ -345,7 +397,7 @@ export async function telephonyRoutes(app: FastifyInstance) {
       retryOfCallId: null,
       telephony: {
         provider: "frejun",
-        frejunCallId: d.frejunCallId,
+        frejunCallId: d.frejunCallId ?? null,
         direction: "inbound" as CallDirection,
         candidateNumber: number,
         virtualNumber: null,
@@ -361,6 +413,46 @@ export async function telephonyRoutes(app: FastifyInstance) {
     });
 
     return { callId: id, attached: true, ...wsUrls(id, "browser_mixed") };
+  });
+
+  // ── Report a lifecycle change observed by the BROWSER ──────────────────
+  // Outbound calls get their truth from FreJun webhooks. INBOUND calls don't:
+  // FreJun has no "the recruiter pressed Accept" event, and a call the
+  // recruiter declines may never produce a webhook we can map back at all. The
+  // softphone SDK is the only witness, so it reports here.
+  //
+  // Everything still goes through applyStatus, so the rank guard keeps a late
+  // browser report from clobbering a webhook that already moved the call on.
+  const SDK_REPORTABLE = ["answered", "completed", "not-answered", "failed"] as const;
+  app.post<{ Params: { id: string } }>("/calls/:id/status", async (req, reply) => {
+    const parsed = z
+      .object({ status: z.enum(SDK_REPORTABLE) })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_payload", issues: parsed.error.flatten() });
+    }
+    const call = await collections.interviews().findOne<InterviewTelephonyDoc>({ id: req.params.id });
+    if (!call || call.recruiterUserId !== req.authUser!.uid) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
+    const now = new Date();
+    const status = parsed.data.status;
+    const applied = await applyStatus({
+      callId: req.params.id,
+      status,
+      source: "sdk",
+      patch: status === "answered" ? { answerTime: now } : { endTime: now },
+      log: req.log,
+    });
+    // Close the interview on a terminal report so the Call Logs row shows a
+    // duration instead of hanging "in progress" forever.
+    if (applied && status !== "answered") {
+      await collections
+        .interviews()
+        .updateOne({ id: req.params.id, status: { $ne: "ended" } }, { $set: { status: "ended", endedAt: now } });
+    }
+    return { ok: true, applied };
   });
 
   // ── Retry ──────────────────────────────────────────────────────────────

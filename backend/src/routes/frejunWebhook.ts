@@ -21,7 +21,15 @@ import { collections } from "../mongo.js";
 import { env } from "../env.js";
 import { fetchRecording } from "../telephony/frejun.js";
 import { applyStatus, mapFrejunStatus } from "../telephony/callState.js";
+import { normalizeIndianNumber } from "./telephony.js";
 import { broadcastToCall } from "../ws/session.js";
+
+/**
+ * How stale an unmatched inbound record may be before a webhook stops claiming
+ * it. Deliveries for a call arrive within seconds-to-minutes; anything older is
+ * a different call from the same candidate.
+ */
+const INBOUND_MATCH_WINDOW_MS = 60 * 60 * 1000;
 
 interface RawBodyRequest extends FastifyRequest {
   rawBody?: string;
@@ -83,8 +91,8 @@ async function resolveInterviewId(body: FrejunWebhookBody): Promise<string | nul
       .findOne<{ id: string }>({ id: stamped }, { projection: { _id: 0, id: 1 } });
     if (byStamp) return byStamp.id;
   }
-  // Inbound calls carry no stamp — fall back to FreJun's own id, which the
-  // /calls/attach route records when the recruiter accepts.
+  // Inbound calls carry no stamp — fall back to FreJun's own id, which
+  // /calls/attach records whenever the browser happens to know it.
   if (body.call_id) {
     const byCall = await collections
       .interviews()
@@ -93,6 +101,36 @@ async function resolveInterviewId(body: FrejunWebhookBody): Promise<string | nul
         { projection: { _id: 0, id: 1 } },
       );
     if (byCall) return byCall.id;
+  }
+
+  // Last resort, INBOUND only: the softphone SDK never exposes FreJun's call
+  // id on an incoming invite (UserAgent.js#onInvite gives us the caller's
+  // display name and nothing else), so the record /calls/attach created at
+  // ring time has a null frejunCallId and neither lookup above can find it.
+  // Match on the caller's number instead, then stamp the id so every
+  // subsequent delivery for this call takes the fast path.
+  const inbound = (body.call_type ?? "").toLowerCase().startsWith("in");
+  if (inbound && body.candidate_number) {
+    const number = normalizeIndianNumber(body.candidate_number);
+    if (number) {
+      const byNumber = await collections.interviews().findOne<{ id: string }>(
+        {
+          "telephony.direction": "inbound",
+          "telephony.frejunCallId": null,
+          "telephony.candidateNumber": number,
+          createdAt: { $gte: new Date(Date.now() - INBOUND_MATCH_WINDOW_MS) },
+        },
+        { projection: { _id: 0, id: 1 }, sort: { createdAt: -1 } },
+      );
+      if (byNumber) {
+        if (body.call_id) {
+          await collections
+            .interviews()
+            .updateOne({ id: byNumber.id }, { $set: { "telephony.frejunCallId": body.call_id } });
+        }
+        return byNumber.id;
+      }
+    }
   }
   return null;
 }
