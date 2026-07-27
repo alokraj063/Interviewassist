@@ -150,6 +150,11 @@ export type SessionServerMessage =
         | "ringing"
         | "answered"
         | "completed"
+        // Actively refused — the recruiter pressed Decline on an inbound call,
+        // or the candidate rejected an outbound one. Distinct from
+        // "not-answered" (nobody reached the phone) because the call log has to
+        // tell "they said no" apart from "nobody picked up".
+        | "declined"
         | "busy"
         | "not-answered"
         | "failed";

@@ -101,6 +101,17 @@ export async function ensureIndexes(): Promise<void> {
     { "telephony.frejunCallId": 1 },
     { unique: true, partialFilterExpression: { "telephony.frejunCallId": { $type: "string" } } },
   );
+  // "Every call — and every note — for this candidate", the query behind the
+  // per-candidate notes history. Sparse: rows created before
+  // lib/candidateIdentity.ts existed carry neither field.
+  await collections.interviews().createIndex(
+    { candidateUid: 1, startedAt: -1 },
+    { sparse: true },
+  );
+  await collections.interviews().createIndex(
+    { candidateKey: 1, startedAt: -1 },
+    { sparse: true },
+  );
   await collections.frejunEvents().createIndex({ dedupeKey: 1 }, { unique: true });
   // Per-recruiter FreJun OAuth grants + the short-lived pending-grant rows the
   // callback matches on (FreJun does not echo `state`, so this is what ties a

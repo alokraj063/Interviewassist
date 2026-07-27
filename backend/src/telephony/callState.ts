@@ -17,6 +17,8 @@ export type TelephonyStatus =
   | "ringing"
   | "answered"
   | "completed"
+  /** Actively refused — the recruiter pressed Decline, or the candidate rejected the call. */
+  | "declined"
   | "busy"
   | "not-answered"
   | "failed";
@@ -34,6 +36,7 @@ const RANK: Record<TelephonyStatus, number> = {
   ringing: 2,
   answered: 3,
   completed: 4,
+  declined: 4,
   busy: 4,
   "not-answered": 4,
   failed: 4,
@@ -79,6 +82,12 @@ export function mapFrejunStatus(
   if (s.includes("inbound") && s.includes("initiated")) return "ringing";
   if (s === "answered" || s.includes("call answered")) return answeredGate("answered");
   if (s === "completed" || s.includes("call completed")) return "completed";
+  // An active refusal, by either side. Kept distinct from "not-answered"
+  // because the call log has to tell "they said no" apart from "nobody picked
+  // up" — the recruiter acts differently on each.
+  if (s === "declined" || s === "rejected" || s.includes("declin") || s.includes("reject")) {
+    return "declined";
+  }
   if (s === "busy" || s.includes("call busy")) return "busy";
   if (s === "not-answered" || s === "user-not-answered" || s.includes("not answered")) {
     return "not-answered";
@@ -120,6 +129,20 @@ export async function applyStatus(input: ApplyStatusInput): Promise<boolean> {
   const prev = current.telephony?.status;
   if (prev && RANK[status] < RANK[prev]) {
     log.info({ callId, prev, status, source }, "ignoring stale telephony status");
+    return false;
+  }
+  // Terminal statuses all share the TOP rank, so the guard above — which only
+  // rejects a lower rank — happily let a later terminal status overwrite an
+  // earlier one. That is exactly how a missed inbound call ended up labelled
+  // "completed" (QA TC053): the browser correctly reported "not-answered" the
+  // instant the ring stopped, then FreJun's webhook landed a second later
+  // calling the same call "completed", because that is what FreJun calls every
+  // finished call regardless of whether anyone picked up.
+  //
+  // First terminal wins. The browser is the only witness to whether the
+  // recruiter actually answered, and it always reports first.
+  if (prev && status !== prev && isTerminal(prev)) {
+    log.info({ callId, prev, status, source }, "keeping first terminal telephony status");
     return false;
   }
   // Same-rank repeats (duplicate deliveries) still refresh `patch` but must not
