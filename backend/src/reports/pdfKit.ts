@@ -39,6 +39,11 @@ const TONE: Record<Tone, { fg: RGB; bg: RGB }> = {
 
 export function toneFor(label: string | undefined): Tone {
   const s = (label ?? "").toLowerCase();
+  // Overall-verdict labels (Good/Above Average/Average/Below Average/Poor) — checked
+  // first since "average" is a substring of "below average" / "above average".
+  if (/below average|\bpoor\b/.test(s)) return "rose";
+  if (/above average|\bgood\b/.test(s)) return "emerald";
+  if (/\baverage\b/.test(s)) return "amber";
   if (/easy|strong|adequate|manual|pass|yes/.test(s)) return "emerald";
   if (/medium|weak|borderline|concern/.test(s)) return "amber";
   if (/hard|bad|vague|off|no|skip/.test(s)) return "rose";

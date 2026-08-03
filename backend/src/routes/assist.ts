@@ -211,7 +211,7 @@ All output text MUST be in English.
 Respond ONLY as JSON with this exact shape:
 {"satisfied": bool, "verdict": one of "Strong"|"Adequate"|"Weak"|"Off-topic"|"Vague", "feedback": str, "followUp": str}`;
 
-const FINAL_SYSTEM = `You are a senior interview evaluator producing the FINAL evaluation after the interview. You receive the JD, the candidate profile/resume, and the full transcript (every Q with its answer + the live verdict). Be honest and calibrated — don't inflate or deflate; ground claims in what the candidate actually said. If the interview was short, lower confidence and prefer "Borderline".
+const FINAL_SYSTEM = `You are a senior interview evaluator producing the FINAL evaluation after the interview. You receive the JD, the candidate profile/resume, and the full transcript (every Q with its answer + the live verdict). Be honest and calibrated — don't inflate or deflate; ground claims in what the candidate actually said. If the interview was short, lower confidence and prefer "Average".
 
 EVIDENCE WEIGHTING — THE MOST IMPORTANT RULE: score from what the candidate actually SAID in the interview. The resume and JD are context that tell you what to look for — they are NOT evidence of ability. A resume claim only counts when the candidate backed it up with specifics on the call. An impressive resume with thin answers is a WEAK interview and must score as one. skills_match reflects only skills demonstrated or credibly discussed in the answers; depth reflects the concrete detail they actually gave. Strengths/concerns must cite the answers, never resume facts.
 
@@ -220,7 +220,7 @@ Score each dimension 0-100: communication, relevance, depth, skills_match, overa
 All output text MUST be in English.
 
 Respond ONLY as JSON with this exact shape:
-{"verdict": one of "Strong yes"|"Lean yes"|"Borderline"|"Lean no"|"Strong no",
+{"verdict": one of "Good"|"Above Average"|"Average"|"Below Average"|"Poor",
  "score": {"overall": int, "communication": int, "relevance": int, "depth": int, "skills_match": int},
  "summary": str (2-3 sentences), "strengths": [up to 3], "concerns": [up to 3]}`;
 
@@ -422,7 +422,7 @@ EVIDENCE WEIGHTING — THE MOST IMPORTANT RULE: the TRANSCRIPT is the evaluation
 
 Do TWO things:
 (1) Reconstruct the interview as the key QUESTIONS the interviewer asked, each with the candidate's ANSWER (summarised from the transcript) and a short verdict.
-(2) Produce a calibrated FINAL evaluation OF THE CALL. Be honest and grounded in what was actually said. If the call was very short or thin on substance, lower confidence, prefer "Borderline" or lower, and say so in the summary.
+(2) Produce a calibrated FINAL evaluation OF THE CALL. Be honest and grounded in what was actually said. If the call was very short or thin on substance, lower confidence, prefer "Average" or lower, and say so in the summary.
 
 Score each dimension 0-100 from TRANSCRIPT EVIDENCE ONLY:
 - communication: how clearly and coherently they actually spoke on the call.
@@ -436,7 +436,7 @@ CALIBRATION CAPS (hard rules): if the candidate gave NO concrete example anywher
 STRENGTHS and CONCERNS must each cite what happened ON THE CALL — something they said, demonstrated, or conspicuously failed to say. Never list a resume fact (e.g. "strong educational background") as a strength. A gap between what the resume claims and what the candidate could actually discuss IS a concern worth naming.
 
 All output MUST be in English. Respond ONLY as JSON with this exact shape:
-{"verdict": "Strong yes"|"Lean yes"|"Borderline"|"Lean no"|"Strong no",
+{"verdict": "Good"|"Above Average"|"Average"|"Below Average"|"Poor",
  "score": {"overall": int, "communication": int, "relevance": int, "depth": int, "skills_match": int},
  "summary": str (2-3 sentences),
  "strengths": [up to 3],
@@ -497,7 +497,7 @@ export async function evaluateCallFromTranscript(callId: string, uid: string): P
   const questions = (result.questions as CallEvaluation["questions"]) ?? [];
   return {
     kind: "interview_eval",
-    verdict: (result.verdict as string) ?? "Borderline",
+    verdict: (result.verdict as string) ?? "Average",
     score: (result.score as Record<string, number>) ?? {},
     summary: (result.summary as string) ?? "",
     strengths: (result.strengths as string[]) ?? [],
@@ -679,7 +679,7 @@ export async function assistRoutes(app: FastifyInstance) {
 
     const evaluation = {
       kind: "interview_eval" as const,
-      verdict: (result.verdict as string) ?? "Borderline",
+      verdict: (result.verdict as string) ?? "Average",
       score: (result.score as Record<string, number>) ?? {},
       summary: (result.summary as string) ?? "",
       strengths: (result.strengths as string[]) ?? [],
