@@ -510,6 +510,63 @@ export async function evaluateCallFromTranscript(callId: string, uid: string): P
   };
 }
 
+// --- Plain-English recap of what was actually discussed on the call, as
+// opposed to `evaluateCallFromTranscript`'s scoring verdict. Recruiters use
+// this to skim a completed call without reading the full transcript. --------
+const CONVERSATION_SUMMARY_SYSTEM = `You are summarising a recruiter-candidate screening call for a recruiter who did not attend it.
+
+The call used a single mixed microphone, so speaker labels may be WRONG. Judge by CONTENT: the INTERVIEWER asks short probing questions; the CANDIDATE describes their own experience, skills, and decisions. Reconstruct the conversation from content, not labels.
+
+Write a plain, readable recap of what was actually DISCUSSED — not a score, not a hire/no-hire verdict, not a judgement of the candidate's quality. Just: what topics came up, what the candidate said about each, and anything logistical that was agreed or raised (notice period, CTC, location, availability, etc.) if it came up.
+
+All output MUST be in English, even if the call itself was in Hindi/Hinglish. Respond ONLY as JSON with this exact shape:
+{"summary": str (a short narrative recap, 4-6 sentences),
+ "topics": [str, ... up to 6 short topic labels covered on the call, in the order discussed],
+ "logistics": str (notice period / CTC / location / availability mentioned on the call, or "" if none came up)}`;
+
+export interface ConversationSummary {
+  kind: "conversation_summary";
+  summary: string;
+  topics: string[];
+  logistics: string;
+  generatedAt: string;
+}
+
+/**
+ * Plain narrative recap of a finished call's inline transcript[] — sibling to
+ * `evaluateCallFromTranscript` but purely descriptive, no scoring. Returns
+ * null only when there's nothing to summarise (no OpenAI key, or no captured
+ * conversation).
+ */
+export async function summarizeCallTranscript(callId: string, uid: string): Promise<ConversationSummary | null> {
+  if (!env.OPENAI_API_KEY) return null;
+  const ctx = await loadJdResume(callId, uid);
+  if (!ctx) return null;
+
+  const call = await collections.interviews().findOne<{
+    transcript?: Array<{ speaker?: string; text?: string; tsStartMs?: number }>;
+  }>({ id: callId }, { projection: { _id: 0, transcript: 1 } });
+  const turns = (call?.transcript ?? [])
+    .slice()
+    .sort((a, b) => (a.tsStartMs ?? 0) - (b.tsStartMs ?? 0));
+  const transcript = turns
+    .map((t) => `${(t.speaker || "?").toUpperCase()}: ${(t.text || "").trim()}`)
+    .filter((l) => l.length > 3)
+    .join("\n")
+    .trim();
+  if (!transcript) return null;
+
+  const user = `ROLE THE CALL WAS ABOUT:\n${ctx.jd || "(none)"}\n\nCANDIDATE:\n${ctx.resume || "(none)"}\n\nFULL CALL TRANSCRIPT (labels may be imperfect — judge by content):\n${transcript}`;
+  const result = await gptJson(CONVERSATION_SUMMARY_SYSTEM, user, { orgId: uid, operation: "conversation_summary", callId });
+  return {
+    kind: "conversation_summary",
+    summary: (result.summary as string) ?? "",
+    topics: (result.topics as string[]) ?? [],
+    logistics: (result.logistics as string) ?? "",
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 export async function assistRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
 

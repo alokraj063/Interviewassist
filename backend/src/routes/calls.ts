@@ -27,7 +27,7 @@ import { blobStore } from "@j2w/ingest-shared";
 import { env } from "../env.js";
 import { getProviderCredentials } from "../integrations/resolver.js";
 import { buildInterviewReport, type InterviewEval } from "../reports/interviewReport.js";
-import { evaluateCallFromTranscript } from "./assist.js";
+import { evaluateCallFromTranscript, summarizeCallTranscript } from "./assist.js";
 
 const transcriptionChoiceSchema = z.object({
   provider: z.enum(["deepgram", "sarvam", "shunya"]).default("deepgram"),
@@ -564,5 +564,22 @@ export async function callsRoutes(app: FastifyInstance) {
     }>({ id: req.params.id }, { projection: { _id: 0, recruiterUserId: 1, transcript: 1 } });
     if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
     return { turns: call.transcript ?? [] };
+  });
+
+  // ── Conversation summary (on-demand, cached) ──────────────────────────
+  // Plain-English recap of what was discussed, sibling to the scoring
+  // `summary` set by /:id/end. Not generated automatically — the recruiter
+  // triggers it from the call detail drawer; once generated it's cached
+  // inline as `conversationSummary` so GET /:id returns it for free after
+  // that, same caching shape as the eval `summary`.
+  app.post<{ Params: { id: string } }>("/:id/summary", async (req, reply) => {
+    const call = await collections.interviews().findOne<{ recruiterUserId: string }>({ id: req.params.id });
+    if (!call || call.recruiterUserId !== req.authUser!.uid) return reply.code(404).send({ error: "not_found" });
+
+    const generated = await summarizeCallTranscript(req.params.id, req.authUser!.uid);
+    if (!generated) return reply.code(422).send({ error: "not_enough_transcript" });
+
+    await collections.interviews().updateOne({ id: req.params.id }, { $set: { conversationSummary: generated } });
+    return { ok: true, conversationSummary: generated };
   });
 }
