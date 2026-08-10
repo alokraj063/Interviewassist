@@ -271,12 +271,15 @@ const historySchema = z.array(
 );
 
 // --- JD-specific, SKILL-WISE question bank (generated once per demand) -------
-const BANK_TARGET_QUESTIONS = 30;   // aim for ~30 in ONE call — speed over bulk
-const BANK_TOPUP_THRESHOLD = 26;    // top up (once) only if the first call fell short
-const BANK_MAX_QUESTIONS = 32;      // hard cap enforced in code — models over-count
+const BANK_TARGET_QUESTIONS = 33;   // aim for ~33 in ONE call — speed over bulk
+const BANK_TOPUP_THRESHOLD = 30;    // top up (once) only if the first call fell short
+const BANK_MAX_QUESTIONS = 35;      // hard cap enforced in code — models over-count
 const BANK_SYSTEM = `You are an expert technical interviewer building a reusable QUESTION BANK for a specific JOB DESCRIPTION. The bank is organised SKILL-WISE: grouped by the distinct skills/areas the JD requires.
 
-STEP 1 — Extract skills: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
+STEP 1 — Pick the skill list to cover. The user message may contain a CALIBRATION block with "PRIMARY SKILLS" and/or "SECONDARY SKILLS" lists — the reconciled, authoritative skill classification for this demand. Choose the skill set STRICTLY in this order, and cover ONLY the list you land on (do not blend in the other tier, and do not add extra JD skills outside it):
+  1. PRIMARY SKILLS present and non-empty → use ONLY the Primary Skills list. Ignore Secondary Skills entirely.
+  2. PRIMARY SKILLS absent/empty AND SECONDARY SKILLS present and non-empty → fall back to ONLY the Secondary Skills list.
+  3. Neither list present (no calibration was run for this demand) → fall back to the general extraction: read the JD and list its distinct required skills/areas (each named module, technology, process, integration, tool, methodology). Example for an SAP MM + VMS role: "SAP MM – Procurement", "Inventory Management", "Material Valuation", "Goods Receipt / Goods Issue", "Invoice Verification", "MM Configuration (purchasing orgs/groups, material types, valuation classes)", "Master Data", "SD & FICO Integration", "IDOC / Flat-file Interfaces", "VMS".
 
 STEP 2 — For EACH skill, write DETAILED, SPECIFIC, HIGH-QUALITY questions that probe real hands-on depth in THAT skill — name the exact configuration object, process step, or scenario. Each question is 1–2 sentences (a brief concrete scenario then a precise ask) that only someone who has actually done the work could answer well. NO generic questions ("tell me about your experience", "what are your strengths", "are you familiar with X"). NO yes/no questions and NO duplicates or near-duplicates. Mix difficulties within each skill and tag each: "Easy" (fundamentals), "Medium" (applied configuration/usage, trade-offs), "Hard" (complex scenarios, integration/debugging, performance, edge cases).
 
@@ -304,11 +307,11 @@ In ALL cases the answer is compact (one line where possible) — the interviewer
 
 GROUNDING — ANTI-HALLUCINATION: every technology/tool/skill you name (in questions AND answers) MUST literally appear in the JD provided (or the recruiter's added points). NEVER invent a technology the JD doesn't contain.
 
-EMPHASIS: If the recruiter provided EMPHASIS NOTES or ADDITIONAL JD POINTS, weight the bank accordingly — give those skills MORE questions and HARDER ones, and put them first.
+CALIBRATION: the JD may contain a "=== CALIBRATION (refined requirement — overrides JD on conflict) ===" block — the human-refined requirement from client calls. It is MORE authoritative than the JD text: if they conflict, follow the calibration (subject to the PRIMARY/SECONDARY skill selection already made in STEP 1). CAVEATS are disqualifiers the client flagged — include probing questions designed to expose whether the candidate falls into them, but ONLY for skills within the list you selected in STEP 1.
 
-CALIBRATION: the JD may contain a "=== CALIBRATION (refined requirement — overrides JD on conflict) ===" block — the human-refined requirement from client calls. It is MORE authoritative than the JD text: if they conflict, follow the calibration. MUST-HAVES get MORE questions and HARDER ones, and their skills come first in the bank. CAVEATS are disqualifiers the client flagged — include probing questions designed to expose whether the candidate falls into them. GOOD-TO-HAVE items get at most 1–2 questions each.
+EMPHASIS: if the recruiter typed EMPHASIS NOTES or ADDITIONAL JD POINTS, weight the bank accordingly — give those skills MORE questions and HARDER ones, and put them first, EVEN IF the skill falls outside the STEP 1 list — an explicit human ask always wins over the calibration tiering.
 
-SIZE — STRICT: Produce AT LEAST 28 and AT MOST 32 questions total (target ${BANK_TARGET_QUESTIONS}). COUNT your questions before responding — fewer than 28 is a hard failure. Roughly 4–5 per skill. If the JD names many skills, prioritise the must-have/core skills rather than covering everything thinly; if it names only a few, go deeper on each until you reach ${BANK_TARGET_QUESTIONS} quality questions.
+SIZE — STRICT: Produce AT LEAST 30 and AT MOST 35 questions total (target ${BANK_TARGET_QUESTIONS}). COUNT your questions before responding — fewer than 30 is a hard failure, more than 35 is a hard failure. Spread evenly across the STEP 1 skill list — if it has few skills, go deeper on each (more Medium/Hard) until you reach ${BANK_TARGET_QUESTIONS}; if it has many, keep every skill represented rather than dropping any, thinning per-skill count as needed to stay within the cap.
 
 All output text MUST be in English.
 

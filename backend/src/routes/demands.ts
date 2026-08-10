@@ -60,6 +60,11 @@ interface OlDemandCalibration {
     mustHaves?: string[];
     goodToHave?: string[];
     caveats?: string[];
+    // Reconciled skill classification (mustHaves -> primarySkills, goodToHave
+    // -> secondarySkills; see OL's services/matching/skillClassification.js).
+    // The exact skill names the bank's difficulty/count weighting keys off.
+    primarySkills?: string[];
+    secondarySkills?: string[];
   };
 }
 
@@ -236,29 +241,73 @@ export async function demandsRoutes(app: FastifyInstance) {
       .next();
   }
 
-  // Render the calibration into the same block format the OL matching prompt
-  // uses (backend/services/ai/prompts/matchScorePrompt.js) — the BANK_SYSTEM
-  // prompt references this exact header. Empty string when there's nothing
-  // meaningful to say.
-  function buildCalibrationBlock(cal: OlDemandCalibration | null): string {
+  interface SkillTiers { primary: string[]; secondary: string[] }
+
+  // The job's own live skill tagging (`jobSkills.skillsType`) — always
+  // available once someone has tagged the job's skills, independent of
+  // whether a calibration was ever run. Used as a fallback when calibration
+  // has no primary/secondary lists.
+  async function loadJobSkillTiers(jobOid: ObjectId): Promise<SkillTiers> {
+    const rows = await collections
+      .olJobSkills()
+      .find<{ skillId?: ObjectId; skillsType?: "primary" | "secondary" }>({ jobPostingId: jobOid })
+      .toArray();
+    if (!rows.length) return { primary: [], secondary: [] };
+
+    const skillIds = rows.map((r) => r.skillId).filter((v): v is ObjectId => Boolean(v));
+    const skills = await collections
+      .olSkills()
+      .find<{ _id: ObjectId; name?: string }>({ _id: { $in: skillIds } })
+      .toArray();
+    const nameOf = new Map(skills.map((s) => [String(s._id), s.name ?? ""]));
+
+    const primary: string[] = [];
+    const secondary: string[] = [];
+    for (const r of rows) {
+      const name = r.skillId ? nameOf.get(String(r.skillId)) : "";
+      if (!name) continue;
+      (r.skillsType === "secondary" ? secondary : primary).push(name);
+    }
+    return { primary, secondary };
+  }
+
+  // SOURCE priority: calibration's reconciled primary/secondary lists win
+  // when either is non-empty (it's the human-refined, client-call-informed
+  // version); otherwise fall back to the job's live jobSkills tagging. Which
+  // TIER wins within that source (Primary over Secondary) is decided by the
+  // BANK_SYSTEM prompt (STEP 1), not here.
+  function resolveSkillTiers(cal: OlDemandCalibration | null, jobTiers: SkillTiers): SkillTiers {
+    const calPrimary = cal?.fields?.primarySkills ?? [];
+    const calSecondary = cal?.fields?.secondarySkills ?? [];
+    if (calPrimary.length || calSecondary.length) return { primary: calPrimary, secondary: calSecondary };
+    return jobTiers;
+  }
+
+  // Render the calibration + resolved skill tiers into the block format the
+  // OL matching prompt uses (backend/services/ai/prompts/matchScorePrompt.js)
+  // — the BANK_SYSTEM prompt references this exact header. Empty string when
+  // there's nothing meaningful to say.
+  function buildCalibrationBlock(cal: OlDemandCalibration | null, skillTiers: SkillTiers): string {
     const f = cal?.fields;
-    if (!f) return "";
     const list = (items?: string[]) => (items ?? []).filter(Boolean).map((x) => `  • ${x}`).join("\n");
     const hasContent =
-      (f.mustHaves ?? []).length || (f.goodToHave ?? []).length ||
-      (f.caveats ?? []).length || (f.keyResponsibilities ?? []).length ||
-      f.designation || f.experienceFrom || f.experienceTo || f.workMode || f.location;
+      (f?.mustHaves ?? []).length || (f?.goodToHave ?? []).length ||
+      (f?.caveats ?? []).length || (f?.keyResponsibilities ?? []).length ||
+      skillTiers.primary.length || skillTiers.secondary.length ||
+      f?.designation || f?.experienceFrom || f?.experienceTo || f?.workMode || f?.location;
     if (!hasContent) return "";
     return "\n\n=== CALIBRATION (refined requirement — overrides JD on conflict) ===\n" + [
-      f.designation ? `Refined designation: ${f.designation}` : "",
-      (f.experienceFrom || f.experienceTo)
-        ? `Refined experience range: ${f.experienceFrom ?? 0}-${f.experienceTo ?? 0} years` : "",
-      f.workMode ? `Refined work mode: ${f.workMode}` : "",
-      f.location ? `Refined location: ${f.location}` : "",
-      (f.mustHaves ?? []).length ? `MUST-HAVES (hard requirements):\n${list(f.mustHaves)}` : "",
-      (f.caveats ?? []).length ? `CAVEATS (disqualifiers / watch-outs):\n${list(f.caveats)}` : "",
-      (f.goodToHave ?? []).length ? `GOOD-TO-HAVE (bonus):\n${list(f.goodToHave)}` : "",
-      (f.keyResponsibilities ?? []).length ? `KEY RESPONSIBILITIES:\n${list(f.keyResponsibilities)}` : "",
+      f?.designation ? `Refined designation: ${f.designation}` : "",
+      (f?.experienceFrom || f?.experienceTo)
+        ? `Refined experience range: ${f?.experienceFrom ?? 0}-${f?.experienceTo ?? 0} years` : "",
+      f?.workMode ? `Refined work mode: ${f.workMode}` : "",
+      f?.location ? `Refined location: ${f.location}` : "",
+      (f?.mustHaves ?? []).length ? `MUST-HAVES (hard requirements):\n${list(f?.mustHaves)}` : "",
+      (f?.caveats ?? []).length ? `CAVEATS (disqualifiers / watch-outs):\n${list(f?.caveats)}` : "",
+      (f?.goodToHave ?? []).length ? `GOOD-TO-HAVE (bonus):\n${list(f?.goodToHave)}` : "",
+      skillTiers.primary.length ? `PRIMARY SKILLS (must-have skill list — weight heaviest):\n${list(skillTiers.primary)}` : "",
+      skillTiers.secondary.length ? `SECONDARY SKILLS (good-to-have skill list — weight lightest):\n${list(skillTiers.secondary)}` : "",
+      (f?.keyResponsibilities ?? []).length ? `KEY RESPONSIBILITIES:\n${list(f?.keyResponsibilities)}` : "",
     ].filter(Boolean).join("\n");
   }
 
@@ -296,7 +345,9 @@ export async function demandsRoutes(app: FastifyInstance) {
     const baseJd = await buildJdText(job);
     if (!baseJd) return reply.code(400).send({ ok: false, error: "demand_has_no_jd" });
     const calibration = await loadLatestCalibration(job._id);
-    const calBlock = buildCalibrationBlock(calibration);
+    const jobSkillTiers = await loadJobSkillTiers(job._id);
+    const skillTiers = resolveSkillTiers(calibration, jobSkillTiers);
+    const calBlock = buildCalibrationBlock(calibration, skillTiers);
     const fingerprint = fingerprintOf(baseJd, calBlock);
 
     if (!addedJd && versions.length > 0) {

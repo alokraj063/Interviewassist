@@ -77,6 +77,11 @@ export const collections = {
   olUserDetails:        () => col("userDetails"),
   // Human-refined demand calibration (one doc per (jobPostingId, version)).
   olDemandCalibrations: () => col("demand_calibration"),
+  // Per-job skill tagging (jobPostingId, skillId, skillsType: primary|secondary)
+  // — always present once a job's skills are tagged, independent of whether a
+  // calibration was ever run. `skillId` refs `olSkills` for the display name.
+  olJobSkills:          () => col("jobSkills"),
+  olSkills:             () => col("skills"),
 
   // ── Interview-Assist owned (writeable) ──────────────────────────────
   interviews:           () => col("ia_interviews"),
