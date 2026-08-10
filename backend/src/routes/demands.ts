@@ -363,10 +363,17 @@ export async function demandsRoutes(app: FastifyInstance) {
       ? `${baseJd}${calBlock}\n\nADDITIONAL JD POINTS (added by the recruiter — weight these too):\n${addedJd}`
       : `${baseJd}${calBlock}`;
 
+    // Mirrors BANK_SYSTEM's own STEP 1 priority (Primary if non-empty, else
+    // Secondary) so the coverage top-up can tell whether the model actually
+    // covered every skill it was told to. Empty when neither tier has
+    // anything — that's the raw-JD-extraction fallback, where there's no
+    // fixed list to check coverage against.
+    const expectedSkills = skillTiers.primary.length ? skillTiers.primary : skillTiers.secondary;
+
     const bank = await generateJdQuestionBank(effectiveJd, existing?.assessmentNotes ?? "", {
       orgId: ctx.uid,
       operation: "plan",
-    });
+    }, expectedSkills);
     const generatedAt = new Date();
     const nextVersion = (versions[versions.length - 1]?.version ?? 0) + 1;
     const newVersions: BankVersion[] = [
