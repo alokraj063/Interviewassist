@@ -354,6 +354,19 @@ function parseBankSkills(result: Record<string, unknown>): BankSkillGroup[] {
 }
 
 const normQ = (q: string) => q.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// Expected skills the model completely skipped (zero questions under a
+// matching skill-group name) — fuzzy substring match since the model may
+// phrase a skill slightly differently ("SQL" vs "SQL querying").
+function missingSkills(skills: BankSkillGroup[], expected: string[]): string[] {
+  const have = skills.filter((s) => s.questions.length > 0).map((s) => normQ(s.skill));
+  return expected.filter((exp) => {
+    const e = normQ(exp);
+    if (!e) return false;
+    return !have.some((h) => h.includes(e) || e.includes(h));
+  });
+}
+
 function mergeBankSkills(base: BankSkillGroup[], extra: BankSkillGroup[]): BankSkillGroup[] {
   const seen = new Set(base.flatMap((s) => s.questions.map((q) => normQ(q.question))));
   const out = base.map((s) => ({ skill: s.skill, questions: [...s.questions] }));
@@ -387,12 +400,17 @@ function trimBankSkills(skills: BankSkillGroup[], max: number): BankSkillGroup[]
 /**
  * Generate a skill-wise question bank for a JD (+ optional emphasis notes).
  * Normally a SINGLE model call targeting ~${BANK_TARGET_QUESTIONS} questions;
- * one top-up round only if the first call falls far short (< threshold).
+ * up to two top-up rounds only when needed: one if the first call falls far
+ * short on TOTAL count (< threshold), one if it's missing a whole skill from
+ * `expectedSkills` (the STEP 1 skill list the caller resolved) even though
+ * the total count looks fine — a model can hit the target count while
+ * silently skipping one of the required skills entirely.
  */
 export async function generateJdQuestionBank(
   jd: string,
   notes: string,
   track: { orgId: string; operation: string; callId?: string | null },
+  expectedSkills: string[] = [],
 ): Promise<JdQuestionBank> {
   const baseUser = `JOB DESCRIPTION:\n${jd || "(none provided)"}\n\nEMPHASIS NOTES / ADDITIONAL JD POINTS (weight these too):\n${notes?.trim() || "(none)"}`;
   let skills = parseBankSkills(await gptJson(BANK_SYSTEM, baseUser, track));
@@ -404,6 +422,15 @@ export async function generateJdQuestionBank(
     const more = parseBankSkills(await gptJson(BANK_SYSTEM, topUpUser, track));
     skills = mergeBankSkills(skills, more);
   }
+
+  const missing = missingSkills(skills, expectedSkills);
+  if (missing.length) {
+    const have = skills.map((s) => `${s.skill}:\n${s.questions.map((q) => `- ${q.question}`).join("\n")}`).join("\n\n");
+    const coverageUser = `${baseUser}\n\nQUESTIONS ALREADY WRITTEN (do NOT repeat or paraphrase these):\n${have}\n\nThe bank above is completely MISSING these required skills — it has ZERO questions for them: ${missing.join(", ")}. Generate 3-5 high-quality questions for EACH missing skill listed above, following all the same rules (depth mix, type mix, grounding). Cover ONLY these missing skills — do not add more questions to skills already covered above. Same JSON shape.`;
+    const covered = parseBankSkills(await gptJson(BANK_SYSTEM, coverageUser, track));
+    skills = mergeBankSkills(skills, covered);
+  }
+
   skills = trimBankSkills(skills, BANK_MAX_QUESTIONS);
 
   return {
